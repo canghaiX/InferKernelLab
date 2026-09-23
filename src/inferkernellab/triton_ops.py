@@ -16,6 +16,14 @@ def triton_available() -> bool:
 
 if triton is not None:
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"block_n": 32}, num_warps=2, num_stages=2),
+            triton.Config({"block_n": 64}, num_warps=4, num_stages=2),
+            triton.Config({"block_n": 128}, num_warps=4, num_stages=3),
+        ],
+        key=["head_dim"],
+    )
     @triton.jit
     def _paged_decode_kernel(
         q_ptr,
@@ -99,8 +107,6 @@ def paged_decode_attention_triton(query, cache, block_tables, context_lens, scal
     """Run the optional Triton kernel; imports are kept optional for CPU tests."""
     if not triton_available():
         raise RuntimeError("Triton CUDA backend is unavailable")
-    from .attention import paged_decode_attention
-
     if query.ndim != 3 or query.device.type != "cuda":
         raise ValueError("query must be a CUDA tensor with shape [B,H,D]")
     if isinstance(block_tables, list):
@@ -125,9 +131,7 @@ def paged_decode_attention_triton(query, cache, block_tables, context_lens, scal
         block_tables.stride(0), output.stride(0), output.stride(1),
         query.shape[1], layout.num_kv_heads, layout.head_dim,
         block_size=layout.block_size,
-        block_n=64,
         block_d=block_d,
         scale=scale if scale is not None else layout.head_dim ** -0.5,
-        num_warps=4,
     )
     return output

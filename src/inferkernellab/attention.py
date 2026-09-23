@@ -35,6 +35,22 @@ def dense_decode_attention(
     return torch.einsum("bht,htd->bhd", probs, v).to(query.dtype)
 
 
+def dense_decode_attention_batch(
+    query: torch.Tensor,
+    keys: list[torch.Tensor],
+    values: list[torch.Tensor],
+    *,
+    scale: float | None = None,
+) -> torch.Tensor:
+    """Dense contiguous-KV baseline for variable-length request batches."""
+    if len(keys) != query.shape[0] or len(values) != query.shape[0]:
+        raise ValueError("one key/value tensor is required per query")
+    return torch.stack([
+        dense_decode_attention(query[i:i + 1], keys[i], values[i], scale=scale)[0]
+        for i in range(query.shape[0])
+    ])
+
+
 def paged_decode_attention(
     query: torch.Tensor,
     cache: PagedKVCache,
@@ -72,4 +88,3 @@ def paged_decode_attention(
         key, value = cache.read(0, list(tables[index]), int(length))
         outputs.append(dense_decode_attention(query[index:index + 1], key, value, scale=scale)[0])
     return torch.stack(outputs, dim=0)
-

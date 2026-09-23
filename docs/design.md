@@ -41,6 +41,19 @@ more aggressive tiling and pipelining are added.
 - Nsight Compute SOL, DRAM throughput, register pressure, and warp stalls.
 - A replay trace that reports TTFT, TPOT, and active-request count.
 
+## Benchmark interpretation
+
+The dense baseline uses contiguous per-request K/V tensors. The paged reference
+uses the same mathematical operation but performs logical-to-physical block
+translation in PyTorch. The Triton result is compared against the dense output
+and reports P50/P95 latency. A speedup claim is only meaningful when all three
+implementations use the same batch, context, head layout, dtype, warmup, and
+CUDA synchronization protocol.
+
+`estimated_kv_read_gbps` is an analytical estimate based on reading K and V
+once. It is useful for comparing shapes, but it is not a hardware counter. Use
+Nsight Compute's DRAM throughput when making a final bandwidth claim.
+
 ## Runtime boundary
 
 `InferenceRuntime` owns resource lifecycle but intentionally does not own model

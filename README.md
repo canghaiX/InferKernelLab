@@ -19,6 +19,8 @@ checked against the reference implementation before benchmarking.
 - Reference Paged Decode Attention with MHA, GQA, and MQA support.
 - A small token-budget scheduler for prefill/decode workload replay.
 - Optional Triton paged decode attention kernel.
+- Triton KV-cache append kernel.
+- Dense, paged-reference, and Triton benchmark comparison with P50/P95 latency.
 - JSON benchmark output suitable for later plotting and regression checks.
 
 This is not a replacement for vLLM. The goal is to make the memory layout,
@@ -48,6 +50,28 @@ python3 -m inferkernellab.benchmark \
 The command prints a JSON record containing correctness error, latency, and
 throughput. It does not claim a performance win until the same shapes and
 environment are measured against the dense reference.
+
+For a reproducible CUDA environment:
+
+```bash
+./scripts/docker_build.sh
+./scripts/docker_test.sh
+
+# On the current DGX host, use the already cached CUDA/PyTorch image:
+BASE_IMAGE=nano-vllm:latest ./scripts/docker_build.sh
+docker run --rm --gpus all --ipc=host --shm-size=16g \
+  -v "$PWD:/workspace" -w /workspace inferkernellab:cuda \
+  python3 -m inferkernellab.benchmark --device cuda --backend auto \
+  --batch-size 8 --context-len 2048 --num-heads 32 --num-kv-heads 8
+```
+
+Run a JSONL parameter sweep:
+
+```bash
+docker run --rm --gpus all --ipc=host --shm-size=16g \
+  -v "$PWD:/workspace" -w /workspace inferkernellab:cuda \
+  python3 scripts/run_benchmark_sweep.py
+```
 
 ## Architecture
 

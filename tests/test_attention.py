@@ -3,6 +3,7 @@ import torch
 
 from inferkernellab.attention import dense_decode_attention, paged_decode_attention
 from inferkernellab.cache import PagedKVCache
+from inferkernellab.append import append_kv_triton, triton_append_available
 from inferkernellab.triton_ops import paged_decode_attention_triton, triton_available
 
 
@@ -38,3 +39,17 @@ def test_triton_attention_matches_reference():
     expected = paged_decode_attention(query, cache, tables, [19, 20])
     actual = paged_decode_attention_triton(query, cache, tables, [19, 20])
     assert torch.allclose(actual, expected, atol=2e-3, rtol=2e-3)
+
+
+@pytest.mark.skipif(not triton_append_available(), reason="requires CUDA and Triton")
+def test_triton_append_matches_torch_write():
+    torch.manual_seed(2)
+    cache = PagedKVCache(8, 8, 2, 16, dtype=torch.float16, device="cuda")
+    table = cache.allocate_request(0, 4)
+    key = torch.randn(4, 2, 16, device="cuda", dtype=torch.float16)
+    value = torch.randn_like(key)
+    slots = cache.slot_mapping(table, 0, 4).to(torch.int32)
+    append_kv_triton(key, value, cache, slots)
+    actual_k, actual_v = cache.read(0, table, 4)
+    assert torch.equal(actual_k, key)
+    assert torch.equal(actual_v, value)

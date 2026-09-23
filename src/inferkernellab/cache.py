@@ -56,7 +56,7 @@ class BlockAllocator:
 class PagedKVCache:
     """KV storage with physical blocks and logical request block tables.
 
-    Storage uses [block, token-in-block, kv-head, head-dim]. The class keeps
+    Storage uses [layer, block, token-in-block, kv-head, head-dim]. The class keeps
     request metadata outside the tensor so the same storage can be exercised by
     both the PyTorch reference path and a Triton kernel.
     """

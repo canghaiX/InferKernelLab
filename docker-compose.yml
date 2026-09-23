@@ -1,0 +1,15 @@
+services:
+  inferkernellab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inferkernellab:cuda
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    ipc: host
+    shm_size: "16gb"
+    gpus: all
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+

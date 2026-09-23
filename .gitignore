@@ -7,5 +7,5 @@ dist/
 build/
 benchmarks/*.json
 benchmarks/*.csv
+benchmarks/*.jsonl
 profile/
-
