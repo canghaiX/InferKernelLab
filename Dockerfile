@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+ARG BASE_IMAGE=nano-vllm:optimized
 FROM ${BASE_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

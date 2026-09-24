@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: nano-vllm:optimized
     image: inferkernellab:cuda
     working_dir: /workspace
     volumes:
@@ -12,4 +14,3 @@ services:
     gpus: all
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-

@@ -21,6 +21,7 @@ class BlockAllocator:
         if num_blocks <= 0:
             raise ValueError("num_blocks must be positive")
         self._free = list(range(num_blocks - 1, -1, -1))
+        self._used: set[int] = set()
         self._owners: dict[int, int] = {}
 
     @property
@@ -29,7 +30,7 @@ class BlockAllocator:
 
     @property
     def num_used_blocks(self) -> int:
-        return len(self._owners)
+        return len(self._used)
 
     def allocate(self, count: int, owner: int | None = None) -> list[int]:
         if count < 0:
@@ -37,15 +38,25 @@ class BlockAllocator:
         if count > len(self._free):
             raise RuntimeError(f"out of KV blocks: requested={count}, free={len(self._free)}")
         blocks = [self._free.pop() for _ in range(count)]
+        self._used.update(blocks)
         if owner is not None:
             for block_id in blocks:
                 self._owners[block_id] = owner
         return blocks
 
-    def free(self, block_ids: list[int] | tuple[int, ...]) -> None:
+    def free(self, block_ids: list[int] | tuple[int, ...], owner: int | None = None) -> None:
+        block_ids = tuple(block_ids)
+        if len(set(block_ids)) != len(block_ids):
+            raise ValueError("block_ids must not contain duplicates")
         for block_id in block_ids:
-            if block_id not in self._owners and block_id in self._free:
-                raise ValueError(f"block {block_id} is already free")
+            if not isinstance(block_id, int) or not 0 <= block_id < len(self._free) + len(self._used):
+                raise ValueError(f"invalid block id: {block_id}")
+            if block_id not in self._used:
+                raise ValueError(f"block {block_id} is not allocated")
+            if owner is not None and self._owners.get(block_id) != owner:
+                raise ValueError(f"block {block_id} is not owned by request {owner}")
+        for block_id in block_ids:
+            self._used.remove(block_id)
             self._owners.pop(block_id, None)
             self._free.append(block_id)
 
@@ -79,6 +90,7 @@ class PagedKVCache:
         shape = (num_layers, num_blocks, block_size, num_kv_heads, head_dim)
         self.k = torch.empty(shape, dtype=dtype, device=self.device)
         self.v = torch.empty_like(self.k)
+        self.device = self.k.device
         self.allocator = BlockAllocator(num_blocks)
 
     @property
@@ -95,18 +107,25 @@ class PagedKVCache:
         count = (num_tokens + self.layout.block_size - 1) // self.layout.block_size
         return self.allocator.allocate(count, owner=request_id)
 
-    def release_request(self, block_table: list[int]) -> None:
-        self.allocator.free(block_table)
+    def release_request(self, block_table: list[int], request_id: int | None = None) -> None:
+        self.allocator.free(block_table, owner=request_id)
 
     def slot_mapping(self, block_table: list[int], start: int, length: int) -> torch.Tensor:
         if start < 0 or length < 0:
             raise ValueError("start and length must be non-negative")
+        if not isinstance(block_table, torch.Tensor) and any(
+            not isinstance(block_id, int) or not 0 <= block_id < self.layout.num_blocks
+            for block_id in block_table
+        ):
+            raise ValueError("block_table contains an invalid physical block id")
+        if isinstance(block_table, torch.Tensor) and block_table.ndim != 1:
+            raise ValueError("block_table must be one-dimensional")
+        if length and (start + length - 1) // self.layout.block_size >= len(block_table):
+            raise ValueError("block_table is shorter than the requested range")
         positions = torch.arange(start, start + length, dtype=torch.long, device=self.device)
         logical = torch.div(positions, self.layout.block_size, rounding_mode="floor")
         offsets = positions.remainder(self.layout.block_size)
         table = torch.as_tensor(block_table, dtype=torch.long, device=self.device)
-        if logical.numel() and int(logical.max()) >= table.numel():
-            raise ValueError("block_table is shorter than the requested range")
         return table[logical] * self.layout.block_size + offsets
 
     def write(

@@ -1,96 +1,69 @@
 # InferKernelLab
 
-InferKernelLab is a small, auditable LLM inference kernel laboratory. It is
-intentionally narrower than a serving framework: the project focuses on the
-three pieces that are easiest to benchmark and explain in an interview:
+InferKernelLab 是一个面向 LLM 推理优化的可审计实验项目，重点展示 paged KV cache、decode attention Triton kernel、正确性验证和性能测量。它与 MiniTrainBench 互补：后者侧重训练/预训练基础设施，本项目侧重推理时的 KV 内存访问与 decode kernel。
 
-```text
-Paged KV cache -> Decode attention -> Scheduling / workload replay
-```
+本项目是推理优化实验室，不是完整 serving 框架：runtime/scheduler 目前用于演示资源生命周期和 token-budget 调度，不负责加载模型或生成 logits。
 
-The project has a pure PyTorch reference path that runs on CPU or CUDA, plus
-an optional Triton backend for CUDA experiments. Every optimized path is
-checked against the reference implementation before benchmarking.
+## 当前能力
 
-## Current scope
+- 物理 KV block 分配、逻辑 block table、slot mapping、读写与资源释放。
+- 支持 MHA、GQA、MQA 的 PyTorch reference decode attention。
+- PyTorch SDPA dense baseline，以及 paged gather + SDPA baseline。
+- 可选 Triton paged decode attention 和 KV append kernel。
+- benchmark 输出各路径的误差、P50/P95、环境信息和形状级相对性能。
+- A100 参数 sweep、Nsight Compute profiling 脚本及面试记录材料。
 
-- Physical KV-cache blocks with logical block tables.
-- Allocation, release, slot mapping, and cache read/write tests.
-- Reference Paged Decode Attention with MHA, GQA, and MQA support.
-- A small token-budget scheduler for prefill/decode workload replay.
-- Optional Triton paged decode attention kernel.
-- Triton KV-cache append kernel.
-- Dense, paged-reference, and Triton benchmark comparison with P50/P95 latency.
-- JSON benchmark output suitable for later plotting and regression checks.
+## 快速开始
 
-This is not a replacement for vLLM. The goal is to make the memory layout,
-kernel behavior, and performance trade-offs small enough to inspect end to end.
-
-## Quick start
-
-```bash
-cd /data/InferKernelLab
-python3 -m pip install -e '.[test]'
-pytest -q
-python3 -m inferkernellab.benchmark --device cpu --batch-size 4 --context-len 128
-```
-
-For a CUDA/Triton run:
-
-```bash
-python3 -m inferkernellab.benchmark \
-  --device cuda \
-  --backend auto \
-  --batch-size 8 \
-  --context-len 2048 \
-  --num-kv-heads 8 \
-  --num-heads 32
-```
-
-The command prints a JSON record containing correctness error, latency, and
-throughput. It does not claim a performance win until the same shapes and
-environment are measured against the dense reference.
-
-For a reproducible CUDA environment:
+所有 CUDA/Triton 依赖都在 Docker 容器中，不需要修改宿主 Python 环境。默认从本地 `nano-vllm:optimized` 构建，其中包含 PyTorch、Triton、CUDA 工具链和 Nsight Compute：
 
 ```bash
 ./scripts/docker_build.sh
 ./scripts/docker_test.sh
-
-# On the current DGX host, use the already cached CUDA/PyTorch image:
-BASE_IMAGE=nano-vllm:latest ./scripts/docker_build.sh
-docker run --rm --gpus all --ipc=host --shm-size=16g \
-  -v "$PWD:/workspace" -w /workspace inferkernellab:cuda \
-  python3 -m inferkernellab.benchmark --device cuda --backend auto \
-  --batch-size 8 --context-len 2048 --num-heads 32 --num-kv-heads 8
 ```
 
-Run a JSONL parameter sweep:
+运行一组 decode benchmark：
 
 ```bash
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   -v "$PWD:/workspace" -w /workspace inferkernellab:cuda \
-  python3 scripts/run_benchmark_sweep.py
+  python3 -m inferkernellab.benchmark \
+  --device cuda --backend auto --dtype float16 \
+  --batch-size 4 --context-len 512 \
+  --num-heads 32 --num-kv-heads 8 --head-dim 64 \
+  --block-size 16 --num-blocks 159 --warmup 20 --iterations 100
 ```
 
-## Architecture
+运行完整 54 组 sweep：
+
+```bash
+docker run --rm --gpus all --ipc=host --shm-size=16g \
+  -v "$PWD:/workspace" -w /workspace inferkernellab:cuda \
+  python3 scripts/run_benchmark_sweep.py \
+  --output docs/benchmark_results/local_sweep.jsonl
+```
+
+项目镜像需要本地存在 `nano-vllm:optimized`。如需其他基础镜像，可通过 `BASE_IMAGE` 覆盖；若基础镜像没有 `ncu`，profiling 脚本不会自动在宿主机安装工具。
+
+## 架构
 
 ```text
 src/inferkernellab/
-  cache.py       Physical block allocator and paged KV storage
-  attention.py   Device-independent reference attention
-  triton_ops.py  Optional Triton KV store and decode attention
-  scheduler.py   Token-budget prefill/decode scheduler
-  benchmark.py   Reproducible microbenchmark CLI
+  cache.py       物理 block allocator 与 paged KV 存储
+  attention.py   PyTorch reference、dense SDPA、paged SDPA
+  triton_ops.py  Triton KV append 与 paged decode attention
+  scheduler.py   prefill/decode token-budget 调度示例
+  runtime.py     请求与 KV block 生命周期示例
+  benchmark.py   正确性、延迟和环境信息采集
 ```
 
-The cache layout is:
+KV cache 张量布局为：
 
 ```text
 [num_layers, num_blocks, block_size, num_kv_heads, head_dim]
 ```
 
-Given a logical token position `p` and a request block table:
+逻辑 token 位置 `p` 映射到物理 slot 的过程为：
 
 ```text
 logical_block = p // block_size
@@ -98,24 +71,30 @@ physical_block = block_table[logical_block]
 slot = physical_block * block_size + p % block_size
 ```
 
-The reference attention deliberately uses explicit indexing. That makes it
-easy to compare a kernel against a correct implementation and to inspect the
-cost of non-contiguous KV access.
+## 基准测试口径
 
-## Development roadmap
+- `dense` 与 `paged_reference` 是 PyTorch 数学参考路径，不应当作生产级性能基线。
+- `dense_sdpa` 调用 PyTorch SDPA 处理连续 KV；`paged_sdpa` 将 paged KV gather 成连续张量后再调用 SDPA，计时包含 gather。
+- `triton_paged` 直接通过 block table 读取 paged KV。比较时应优先看相同配置下相对 `paged_sdpa` 的结果。
+- benchmark 构造交错分配的物理 block，并在逻辑 block 之间留出物理空洞，避免只测到连续分配特例；`num_blocks` 需包含这些保留块。
+- 等长 batch 的 dense SDPA 预先堆叠连续 KV，计时期间使用单次 batched SDPA；paged SDPA 在计时期间做 batched gather，再执行 batched SDPA。
+- `estimated_kv_read_gbps` 是按 K/V 理论读取字节数计算的估算值，不是硬件计数器。DRAM 吞吐只能来自 Nsight Compute 等 profiler。
+- CUDA Event 测量的是 GPU 时间线上的设备执行区间，不等同于含 Python 调度、排队和网络开销的线上请求延迟。
+- 输出 `kernel_config` 记录 Triton autotuner 选择的 `block_n`、`num_warps` 和 `num_stages`。
 
-1. Add benchmark plots and Nsight Compute reports for the Triton kernel.
-2. Add prefix-cache reference semantics and LRU eviction.
-3. Add a model adapter for a small Hugging Face causal LM.
-4. Add a fused prefill attention path and compare it with decode behavior.
-5. Add continuous-batching replay traces and TTFT/TPOT measurements.
+当前容器中的 `ncu` 可以启动，但驱动报告 `ERR_NVGPUCTRPERM`，说明 GPU performance counter 权限由宿主驱动策略限制。脚本不会修改宿主机权限；启用该权限后可运行：
 
-## Resume-worthy evidence
+```bash
+docker run --rm --gpus all --ipc=host --shm-size=16g \
+  -v "$PWD:/workspace" -w /workspace inferkernellab:cuda \
+  bash scripts/profile_attention.sh
+```
 
-Do not report a speedup without recording:
+## 面试材料
 
-- GPU, driver, CUDA, PyTorch, and Triton versions.
-- dtype, batch size, context length, head count, head dimension, and block size.
-- warmup count, measured iterations, and synchronization method.
-- reference correctness error and latency distribution.
-- kernel metrics from Nsight Compute when making a kernel-level claim.
+- `docs/change_log.md`：重要改动、设计取舍、测试与实测结果记录。
+- `docs/interview_guide.md`：项目讲解路径、核心知识点与常见追问。
+- `docs/design.md`：内存布局、attention kernel 和 benchmark 设计。
+- `docs/benchmark_report.md`：实际测量配置、结果、限制和复现命令。
+
+简历只引用报告中可复现的形状级结果，并明确比较对象、GPU、精度和测量口径。不要把 reference 对比结果概括成普遍的推理加速比。

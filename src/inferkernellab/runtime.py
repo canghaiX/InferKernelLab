@@ -55,7 +55,7 @@ class InferenceRuntime:
             self.scheduler.mark_decode_step(batch.requests)
             for request in batch.requests:
                 if request.finished:
-                    self.cache.release_request(request.block_table)
+                    self.cache.release_request(request.block_table, request_id=request.request_id)
                     request.block_table = []
         return batch
 
@@ -67,4 +67,3 @@ class InferenceRuntime:
             free_blocks=self.cache.allocator.num_free_blocks,
             used_blocks=self.cache.allocator.num_used_blocks,
         )
-

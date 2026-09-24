@@ -14,6 +14,19 @@ def triton_available() -> bool:
     return triton is not None and torch.cuda.is_available()
 
 
+def paged_decode_autotune_config() -> dict | None:
+    if triton is None:
+        return None
+    best_config = getattr(_paged_decode_kernel, "best_config", None)
+    if best_config is None:
+        return None
+    return {
+        "block_n": best_config.kwargs["block_n"],
+        "num_warps": best_config.num_warps,
+        "num_stages": best_config.num_stages,
+    }
+
+
 if triton is not None:
 
     @triton.autotune(
@@ -22,7 +35,7 @@ if triton is not None:
             triton.Config({"block_n": 64}, num_warps=4, num_stages=2),
             triton.Config({"block_n": 128}, num_warps=4, num_stages=3),
         ],
-        key=["head_dim"],
+        key=["head_dim", "table_width"],
     )
     @triton.jit
     def _paged_decode_kernel(
@@ -43,6 +56,8 @@ if triton is not None:
         stride_table_b,
         stride_out_b,
         stride_out_h,
+        table_width,
+        num_physical_blocks,
         num_heads,
         num_kv_heads,
         head_dim,
@@ -62,16 +77,17 @@ if triton is not None:
         denom = 0.0
         acc = tl.zeros((block_d,), dtype=tl.float32)
         offs_n = tl.arange(0, block_n)
-        for start_n in tl.range(0, context_len, block_n, num_stages=2):
+        for start_n in tl.range(0, context_len, block_n):
             positions = start_n + offs_n
-            active = positions < context_len
             logical_blocks = positions // block_size
+            active = (positions < context_len) & (logical_blocks < table_width)
             offsets = positions - logical_blocks * block_size
             physical_blocks = tl.load(
                 table_ptr + batch_id * stride_table_b + logical_blocks,
                 mask=active,
                 other=0,
             )
+            active = active & (physical_blocks >= 0) & (physical_blocks < num_physical_blocks)
             k = tl.load(
                 k_ptr
                 + physical_blocks[:, None] * stride_k_b
@@ -103,22 +119,64 @@ if triton is not None:
         tl.store(out_ptr + batch_id * stride_out_b + head_id * stride_out_h + offs_d, out, mask=mask_d)
 
 
-def paged_decode_attention_triton(query, cache, block_tables, context_lens, scale=None, layer=0):
-    """Run the optional Triton kernel; imports are kept optional for CPU tests."""
-    if not triton_available():
-        raise RuntimeError("Triton CUDA backend is unavailable")
+def paged_decode_attention_triton(
+    query,
+    cache,
+    block_tables,
+    context_lens,
+    scale=None,
+    layer=0,
+    *,
+    validate_inputs=True,
+):
+    """Run paged decode attention; disable value checks only for prevalidated inputs."""
     if query.ndim != 3 or query.device.type != "cuda":
         raise ValueError("query must be a CUDA tensor with shape [B,H,D]")
+    if query.shape[0] <= 0 or query.shape[1] <= 0 or query.shape[2] <= 0:
+        raise ValueError("query dimensions must be positive")
+    if query.shape[-1] > 128:
+        raise ValueError("the current Triton kernel supports head_dim <= 128")
+    if query.stride(-1) != 1:
+        raise ValueError("query must be contiguous in the head_dim dimension")
     if isinstance(block_tables, list):
         block_tables = torch.tensor(block_tables, dtype=torch.int32, device=query.device)
     if isinstance(context_lens, list):
         context_lens = torch.tensor(context_lens, dtype=torch.int32, device=query.device)
-    output = torch.empty_like(query)
     layout = cache.layout
     if not 0 <= layer < layout.num_layers:
         raise IndexError("layer is out of range")
-    if layout.head_dim > 128:
-        raise ValueError("the current Triton kernel supports head_dim <= 128")
+    if query.shape[-1] != layout.head_dim:
+        raise ValueError("query head_dim does not match cache layout")
+    if query.shape[1] % layout.num_kv_heads != 0:
+        raise ValueError("num_heads must be divisible by num_kv_heads")
+    if query.dtype != cache.dtype or query.device != cache.device:
+        raise ValueError("query and cache must have the same dtype and device")
+    if block_tables.ndim != 2 or block_tables.shape[0] != query.shape[0]:
+        raise ValueError("block_tables must have shape [B, max_blocks]")
+    if context_lens.ndim != 1 or context_lens.shape[0] != query.shape[0]:
+        raise ValueError("context_lens must have shape [B]")
+    if block_tables.device != query.device or context_lens.device != query.device:
+        raise ValueError("block_tables and context_lens must be on the query device")
+    if block_tables.dtype not in (torch.int32, torch.int64):
+        raise ValueError("block_tables must use int32 or int64")
+    if context_lens.dtype not in (torch.int32, torch.int64):
+        raise ValueError("context_lens must use int32 or int64")
+    if block_tables.shape[1] <= 0:
+        raise ValueError("block_tables must contain at least one logical block")
+    if validate_inputs:
+        if bool(torch.any(context_lens <= 0).item()):
+            raise ValueError("context lengths must be positive")
+        max_context = block_tables.shape[1] * layout.block_size
+        if bool(torch.any(context_lens > max_context).item()):
+            raise ValueError("context length exceeds block table capacity")
+        if bool(torch.any(block_tables < 0).item()) or bool(
+            torch.any(block_tables >= layout.num_blocks).item()
+        ):
+            raise ValueError("block table contains an invalid physical block id")
+    if not triton_available():
+        raise RuntimeError("Triton CUDA backend is unavailable")
+
+    output = torch.empty_like(query)
     k_cache = cache.k[layer]
     v_cache = cache.v[layer]
     block_d = triton.next_power_of_2(layout.head_dim)
@@ -129,6 +187,7 @@ def paged_decode_attention_triton(query, cache, block_tables, context_lens, scal
         k_cache.stride(0), k_cache.stride(1), k_cache.stride(2),
         v_cache.stride(0), v_cache.stride(1), v_cache.stride(2),
         block_tables.stride(0), output.stride(0), output.stride(1),
+        block_tables.shape[1], layout.num_blocks,
         query.shape[1], layout.num_kv_heads, layout.head_dim,
         block_size=layout.block_size,
         block_d=block_d,
