@@ -13,7 +13,7 @@ COPY tests ./tests
 COPY docs ./docs
 COPY scripts ./scripts
 
-RUN python3 -m pip install --no-build-isolation -e '.[test,cuda]'
+RUN python3 -m pip install --no-build-isolation -e '.[test,cuda,hf]'
 
 ENTRYPOINT []
 CMD ["pytest", "-q"]

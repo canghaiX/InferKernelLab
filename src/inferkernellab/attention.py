@@ -138,6 +138,7 @@ def paged_decode_attention(
     context_lens: list[int] | torch.Tensor,
     *,
     scale: float | None = None,
+    layer: int = 0,
 ) -> torch.Tensor:
     """Correctness-first Paged Decode Attention implementation.
 
@@ -169,7 +170,7 @@ def paged_decode_attention(
     for index, length in enumerate(lengths):
         if length <= 0:
             raise ValueError("context lengths must be positive")
-        key, value = cache.read(0, list(tables[index]), int(length))
+        key, value = cache.read(layer, list(tables[index]), int(length))
         outputs.append(dense_decode_attention(query[index:index + 1], key, value, scale=scale)[0])
     return torch.stack(outputs, dim=0)
 
@@ -181,6 +182,7 @@ def paged_decode_attention_sdpa(
     context_lens: list[int] | torch.Tensor,
     *,
     scale: float | None = None,
+    layer: int = 0,
 ) -> torch.Tensor:
     """Gather paged KV into contiguous tensors, then call PyTorch SDPA."""
     if query.ndim != 3:
@@ -209,8 +211,8 @@ def paged_decode_attention_sdpa(
         logical_blocks = positions // cache.layout.block_size
         offsets = positions.remainder(cache.layout.block_size)
         physical_blocks = table_tensor[:, logical_blocks]
-        key = cache.k[0, physical_blocks, offsets.unsqueeze(0)]
-        value = cache.v[0, physical_blocks, offsets.unsqueeze(0)]
+        key = cache.k[layer, physical_blocks, offsets.unsqueeze(0)]
+        value = cache.v[layer, physical_blocks, offsets.unsqueeze(0)]
         return dense_decode_attention_sdpa_tensor_batch(query, key, value, scale=scale)
 
     keys = []
@@ -219,7 +221,7 @@ def paged_decode_attention_sdpa(
     for index, length in enumerate(lengths):
         if int(length) <= 0:
             raise ValueError("context lengths must be positive")
-        key, value = cache.read(0, list(tables[index]), int(length))
+        key, value = cache.read(layer, list(tables[index]), int(length))
         keys.append(key)
         values.append(value)
     return dense_decode_attention_sdpa_batch(query, keys, values, scale=scale)

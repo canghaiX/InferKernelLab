@@ -12,6 +12,7 @@ dependencies = ["torch>=2.1"]
 [project.optional-dependencies]
 test = ["pytest>=8"]
 cuda = ["triton>=2.1"]
+hf = ["transformers>=4.57,<5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

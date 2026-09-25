@@ -1,8 +1,13 @@
 # InferKernelLab
 
-InferKernelLab 是一个面向 LLM 推理优化的可审计实验项目，重点展示 paged KV cache、decode attention Triton kernel、单层 synthetic decoder、正确性验证和性能测量。它与 MiniTrainBench 互补：后者侧重训练/预训练基础设施，本项目侧重推理时的 KV 内存访问与 decode kernel。
+InferKernelLab 是一个面向 LLM 推理优化的可审计实验项目，重点展示 paged KV cache、
+decode attention Triton kernel、真实多层 Llama adapter、正确性验证和性能测量。它与
+MiniTrainBench 互补：后者侧重训练/预训练基础设施，本项目侧重推理时的 KV 内存访问与
+decode kernel。
 
-本项目是推理优化实验室，不是完整 serving 框架：runtime/scheduler 不加载外部模型，synthetic decoder 只用于在固定权重下复现 embedding、投影、KV 写入、attention 和 greedy decode 的闭环。
+本项目是推理优化实验室，不是完整 serving 框架：runtime/scheduler 不隐式下载外部模型，
+synthetic decoder 保留固定权重闭环；可选 Transformers adapter 进一步把 paged KV cache
+接入真实的多层 Llama-like decoder。
 
 ## 当前能力
 
@@ -11,6 +16,10 @@ InferKernelLab 是一个面向 LLM 推理优化的可审计实验项目，重点
 - PyTorch SDPA dense baseline，以及 paged gather + SDPA baseline。
 - 可选 Triton paged decode attention 和 KV append kernel。
 - 模型无关的单层 synthetic decoder：embedding、Q/K/V 投影、paged KV append、decode attention、输出投影和 greedy token 生成。
+- 可选 `Transformers/Llama` adapter：tiny random `LlamaConfig`、本地 checkpoint、
+  多层 RMSNorm/RoPE/GQA、paged KV cache 和真实 decoder layer 手动执行。
+- 使用 Transformers eager full-sequence path 做 logits/token correctness oracle，并输出
+  prefill、decode P50/P95、TTFT/TPOT、KV memory 和 backend/kernel 配置。
 - runtime 可选 `prefill_fn`/`decode_fn` hook，保留原有无模型 `step()` 接口。
 - benchmark 输出各路径的误差、P50/P95、环境信息和形状级相对性能。
 - attention microbenchmark 和端到端 decode benchmark 分开记录，避免混淆比较对象。
@@ -61,6 +70,26 @@ docker run --rm --gpus all --ipc=host --shm-size=16g \
 
 `run_decode_sweep.py` 默认比较 `paged_reference`、`paged_sdpa` 和 `triton_paged`。其中 `paged_reference` 是 correctness oracle；`paged_sdpa` 的时间包含 paged gather；Triton 路径直接读取 paged cache。可用 `--include-triton-append` 额外测量 Triton KV append，但该结果单独标记，不混入 attention-only 对照。
 
+运行真实多层 tiny Llama 的 paged decode smoke：
+
+```bash
+IMAGE=inferkernellab:cuda scripts/run_llama_paged_smoke.sh
+```
+
+也可以在已安装 `inferkernellab[hf]` 的环境中直接运行无网络 random model：
+
+```bash
+python3 -m inferkernellab.hf_benchmark \
+  --model-source random --device cuda --dtype bfloat16 \
+  --backend paged_sdpa --batch-size 2 --prompt-length 128 \
+  --max-new-tokens 8 --warmup 10 --iterations 50 \
+  --output docs/benchmark_results/llama_paged.json
+```
+
+`--model-source path --model-path PATH` 只读取本地 Transformers checkpoint，使用
+`local_files_only=True`，不会隐式联网。设计说明见
+[`docs/hf_llama_adapter_design.md`](docs/hf_llama_adapter_design.md)。
+
 项目镜像需要本地存在 `nano-vllm:optimized`。如需其他基础镜像，可通过 `BASE_IMAGE` 覆盖；若基础镜像没有 `ncu`，profiling 脚本不会自动在宿主机安装工具。
 
 ## 架构
@@ -71,6 +100,7 @@ src/inferkernellab/
   attention.py   PyTorch reference、dense SDPA、paged SDPA
   triton_ops.py  Triton KV append 与 paged decode attention
   decode.py      单层 synthetic decoder 与端到端 decode runner
+  hf_benchmark.py 可选 Transformers/Llama 多层 paged decode adapter
   scheduler.py   prefill/decode token-budget 调度示例
   runtime.py     请求、KV block 生命周期和模型执行 hook
   benchmark.py   正确性、延迟和环境信息采集
