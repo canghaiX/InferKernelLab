@@ -2,7 +2,7 @@
 
 ## 项目边界
 
-MiniTrainBench 展示训练与预训练基础设施。本项目聚焦推理侧的 paged KV cache、decode attention kernel 和可复现实验。当前 runtime 不执行真实模型，不管理权重或 logits；scheduler 是便于检查 token-budget 规则的示例实现。
+MiniTrainBench 展示训练与预训练基础设施。本项目聚焦推理侧的 paged KV cache、decode attention kernel 和可复现实验。本项目不下载外部模型，也不实现完整 serving；synthetic decoder 只提供一个固定权重、单层、模型无关的端到端闭环，用于验证 runtime 与 kernel 如何协作。
 
 ## 逻辑与物理 KV 位置
 
@@ -30,12 +30,39 @@ Triton 目前限制 `head_dim <= 128`，并通过 `head_dim`、table capacity �
 
 对一个 tile 的分数 `s`，kernel 维护当前最大分数 `m`、归一化分母 `l` 和加权值累积 `o`。当新 tile 的最大值为 `m'` 时，旧累积按 `exp(m-m')` 重缩放，再合并新 tile 的 `exp(s-m')` 权重。这样无需保存整条 context 的 score/probability 矩阵，且可稳定地跨 tile 归约。
 
+## Runtime 与 synthetic decoder 数据流
+
+runtime 的 scheduler 先处理 prompt token budget，再进入 decode。runtime 在保持旧 `step()` 行为的同时提供两个可选 hook：
+
+```text
+prefill_fn(request, start_token, end_token)
+decode_fn(requests)
+```
+
+prefill hook 收到本次 scheduler 实际推进的 prompt 区间；decode hook 在 scheduler 增加 `generated_tokens` 之前执行。synthetic decoder 的单步顺序为：
+
+```text
+token id
+  -> embedding
+  -> Q/K/V projection
+  -> paged KV append
+  -> paged decode attention
+  -> output projection + lm head
+  -> greedy argmax
+  -> next token KV append
+```
+
+prompt 阶段只计算 K/V 并写入 cache；decode 阶段对当前 token 计算 Q/K/V，用历史 K/V 产生 logits，再把生成 token 的 K/V 写入下一个逻辑位置。每次 benchmark 都创建新的 runner，避免复用半完成的 request 或 autotune 状态。
+
+synthetic decoder 的意义是验证调度、block table、KV 生命周期和 attention backend 的组合，而不是模拟真实模型质量。它没有多层 residual、norm、真实 tokenizer、采样、网络或排队开销，因此端到端数字不能直接外推到 LLM serving。
+
 ## 正确性与边界
 
 - allocator 在释放前先验证整组 block，拒绝重复、未分配、越界或 owner 不匹配的释放，避免部分更新导致 allocator 状态损坏。
 - 支持 MHA/GQA/MQA 的条件是 `num_heads % num_kv_heads == 0`；query head 按组映射到对应 KV head。
 - Triton block table 需是规则二维张量；ragged request 用有效物理 block 填充，另由 `context_lens` 限定有效 token 数。
 - reference 和 SDPA 路径覆盖不同请求长度；Triton wrapper 检查上下文不能超过 table capacity。
+- synthetic decoder 覆盖 batch、MHA/GQA/MQA、prompt block boundary 和生成阶段的 KV block 扩容；结束后 request block 和保留测试 block 都必须释放。
 - Triton CUDA 测试分别覆盖 FP16、BF16、FP32；各 dtype 使用不同数值容差。
 
 ## Benchmark 解释
@@ -43,3 +70,5 @@ Triton 目前限制 `head_dim <= 128`，并通过 `head_dim`、table capacity �
 benchmark 在相同 batch、context、head layout、dtype、warmup 和迭代次数下测量各实现。物理分配在 logical blocks 之间插入保留 block，使逻辑访问不对应连续物理页。`dense` / `paged_reference` 仅是数学参考，不代表生产级优化实现；性能结论优先对比 `triton_paged` 与 `paged_sdpa`，并同时报告 P50/P95 和最大误差。
 
 理论 KV 读取字节数用于计算 `estimated_kv_read_gbps`，不是硬件测量。要报告 DRAM throughput、寄存器或 occupancy，需要 Nsight Compute 硬件计数器。当前容器的 `ncu` 被宿主驱动的 `ERR_NVGPUCTRPERM` 权限策略阻止，因此现阶段不报告硬件计数器结果。
+
+端到端结果中 `matches_reference` 针对 logits 使用 dtype-aware `torch.allclose`；`token_match_rate` 单独记录最终 greedy 生成序列的一致率。近零或小 margin 的 logits 即使在容差内，也可能出现不同 token。

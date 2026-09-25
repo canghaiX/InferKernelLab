@@ -75,3 +75,69 @@ docker run --rm --gpus all --ipc=host --shm-size=16g \
 ```
 
 `estimated_kv_read_gbps` 是由理论 K/V 读取字节数除以时间得到的估算量，不是硬件计数器结果。`kernel_config` 记录每组 autotuner 实际选择的 tile、warps 和 stages。
+
+## 单层 Synthetic Decoder 端到端结果（2026-09-25）
+
+本节记录固定权重、单层、模型无关 decoder 的真实 runtime 闭环。它不是预训练模型质量或生产 serving 吞吐测试，主要用于验证 scheduler、paged KV cache、KV append、decode attention 和 greedy decode 能否在同一条数据流中协作。
+
+### 环境与配置
+
+- GPU：NVIDIA A100-SXM4-40GB，Compute Capability 8.0
+- Driver：580.173.02；PyTorch：2.11.0+cu130；CUDA runtime：13.0；Triton：3.6.0
+- 容器：基于 `nano-vllm:optimized` 构建的 `inferkernellab:cuda`
+- 配置矩阵：batch `1/4/16`，prompt `128/512`，KV heads `32/8/1`（MHA/GQA/MQA），dtype `float16/bfloat16`
+- 固定参数：query heads `32`、head dim `64`、block size `16`、vocab size `256`、生成 `16` tokens、seed `2026`
+- 每个 backend 使用新的 runner；warmup `1` 次、独立重复 `2` 次，最终指标取重复运行中位数
+- 共 `2 × 3 × 2 × 3 × 3 = 108` 条记录，原始 JSONL：`docs/benchmark_results/a100_synthetic_decode.jsonl`
+
+### 指标口径
+
+- `TTFT`：该 batch 所有 prompt prefill step 加第一个 decode step；表格中的 TTFT 使用 wall-clock，JSONL 同时保留 CUDA Event 设备时间版本。
+- `TPOT`：JSONL 显式记录每个生成 token 的平均 decode step 时间，P50/P95 另外描述 step 分布。
+- `decode step P50/P95`：每个 runtime decode step 的 CUDA Event 设备时间分位数；prefill 和 decode 的投影、KV append、attention、logits 都在 step 范围内。
+- `tokens/s`：batch 生成 token 总数除以 decode 阶段耗时；表格使用 device tokens/s，`end_to_end_tokens_per_sec` 使用包含 prefill 的 wall-clock 吞吐。
+- `peak_memory_allocated_bytes`：单次 runner 的 PyTorch allocated memory 峰值；不等于显存 reserved 或线上进程总显存。
+- `matches_reference`：逐步 logits 与 `paged_reference` 按 dtype 容差执行 `torch.allclose`。
+- `token_match_rate`：最终生成 token 序列与 `paged_reference` 的位置一致率；greedy argmax 对很小的 logit margin 不连续，必须和 logits 误差分开解释。
+
+### 按 dtype 的形状矩阵中位数
+
+下表是在 18 个 shape 上取中位数，不是某一个 workload 的承诺值。延迟单位为 ms，吞吐单位为 device tokens/s。
+
+| dtype | attention backend | TTFT | TPOT | decode P50 | decode P95 | device tokens/s | end-to-end tokens/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| FP16 | paged_reference | 5.207 | 2.826 | 2.799 | 2.972 | 1415.2 | 1337.8 |
+| FP16 | paged_sdpa | 3.747 | 1.451 | 1.426 | 1.608 | 2757.1 | 2487.3 |
+| FP16 | triton_paged | 4.126 | 1.719 | 1.674 | 1.910 | 2327.0 | 2127.1 |
+| BF16 | paged_reference | 5.562 | 2.824 | 2.779 | 3.011 | 1416.5 | 1338.1 |
+| BF16 | paged_sdpa | 3.864 | 1.444 | 1.411 | 1.646 | 2769.8 | 2492.4 |
+| BF16 | triton_paged | 4.360 | 1.713 | 1.665 | 1.924 | 2335.5 | 2128.4 |
+
+### 结果解释
+
+- 108/108 条记录的 logits 都通过 dtype-aware correctness check；FP16 最大绝对误差为 `5.97e-4`，BF16 最大绝对误差为 `1.57e-3`。
+- greedy token 一致率最低为 `91.4%`，不是把它当作 logits correctness 失败：差异集中在 logits margin 很小的 argmax 位置。选定的 `B=4, context=512, KV heads=8` 配置在 FP16/BF16 的三个 attention backend 中 token match rate 均为 `100%`。
+- Triton 相对 paged SDPA 的 decode step P50 比值 `paged_sdpa / triton` 中位数为 `0.841x`，范围 `0.785–0.913`，36 个 shape 中 `0/36` 胜出；即当前 synthetic decoder 中 PyTorch SDPA 仍更快。
+- 这个结论与 attention-only benchmark 不矛盾：attention-only 的 Triton direct-paged 路径避免了显式 gather，但端到端路径还包含投影、KV append、kernel launch 和 runtime 调度，PyTorch SDPA backend 可能更成熟。
+- 选定 `B=4, context=512, KV heads=8, FP16` 形状的 append 组合数据见 `docs/benchmark_results/a100_synthetic_decode_triton_append.jsonl`：Torch append + Triton attention 的 decode device P50 为 `1.670 ms`，Triton append + Triton attention 为 `1.502 ms`。该结果只有两次独立重复，不外推为普遍收益。
+
+### 复现命令
+
+```bash
+./scripts/docker_build.sh
+./scripts/docker_test.sh
+
+docker run --rm --gpus all --ipc=host --shm-size=16g \
+  -v "$PWD:/workspace" -w /workspace inferkernellab:cuda \
+  python3 scripts/run_decode_sweep.py \
+  --device cuda --dtypes float16,bfloat16 \
+  --batch-sizes 1,4,16 --context-lens 128,512 \
+  --num-kv-heads-list 32,8,1 --max-new-tokens 16 \
+  --num-heads 32 --head-dim 64 --block-size 16 \
+  --vocab-size 256 --seed 2026 --max-num-batched-tokens 2048 \
+  --warmup 1 --repeats 2 \
+  --backends paged_reference,paged_sdpa,triton_paged \
+  --output docs/benchmark_results/a100_synthetic_decode.jsonl
+```
+
+`ncu` 的 `ERR_NVGPUCTRPERM` 限制仍然存在。本节没有把理论 KV 读取量写成硬件 DRAM throughput，也没有声称已经测得 occupancy 或寄存器瓶颈。

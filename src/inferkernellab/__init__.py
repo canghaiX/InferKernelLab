@@ -11,6 +11,7 @@ from .attention import (
 )
 from .append import append_kv_triton
 from .cache import BlockAllocator, PagedKVCache
+from .decode import DecodeRunResult, SyntheticDecodeRunner, SyntheticDecoderConfig
 from .runtime import InferenceRuntime, RuntimeStats
 from .scheduler import InferenceRequest, TokenBudgetScheduler
 
@@ -18,6 +19,9 @@ __all__ = [
     "BlockAllocator",
     "InferenceRequest",
     "PagedKVCache",
+    "SyntheticDecoderConfig",
+    "SyntheticDecodeRunner",
+    "DecodeRunResult",
     "InferenceRuntime",
     "RuntimeStats",
     "TokenBudgetScheduler",

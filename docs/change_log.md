@@ -35,3 +35,28 @@
 ## 后续记录模板
 
 每个重要迭代追加一节，按“问题 → 方案与取舍 → 验证 → 实测 → 局限/下一步”填写。没有实际运行的数据标记为“未测”，不要写预期 speedup。
+
+## 2026-09-25：单层 synthetic decoder 端到端闭环
+
+### 改动点
+
+- **runtime hook**：在不改变原有 `InferenceRuntime.step()` 调用方式的前提下，增加 `prefill_fn(request, start_token, end_token)` 和 `decode_fn(requests)`。prefill 范围取 scheduler 前后的 `cached_tokens` 差值；decode hook 在生成计数更新前执行，便于模型先计算当前 step，再由 runtime 统一推进状态和释放 block。
+- **模型无关 decoder**：新增单层固定权重 decoder，包含 embedding、Q/K/V projection、paged KV append、三种 decode attention backend、输出 projection、vocab head 和 greedy argmax。不引入 HuggingFace、权重下载或额外依赖。
+- **公平 backend 对照**：默认所有 attention 对照都使用 Torch KV append；Triton append 作为单独组合实验，不把 append 差异混入 attention-only 结论。
+- **端到端指标**：新增 TTFT、prefill time、decode step P50/P95、wall/device tokens/s、显存峰值、peak block 和 logits/token correctness 字段。
+- **数据可追溯**：新增 `a100_synthetic_decode.jsonl`（108 条记录）和 `a100_synthetic_decode_triton_append.jsonl`（选定形状 2 条记录）。
+
+### 验证与实际结果
+
+- 宿主 CPU 测试：39 项通过；Docker 派生镜像中的 CUDA/Triton 全量测试：39 项通过。
+- A100 synthetic sweep：2 个 dtype × 3 个 batch × 2 个 context × 3 个 KV head × 3 个 attention backend = 108 条；108/108 条 logits 通过 dtype-aware `allclose`。
+- FP16 最大绝对误差 `5.97e-4`，BF16 最大绝对误差 `1.57e-3`。greedy token 一致率最低为 `91.4%`，原因是近似相等的 logits 在不同数值路径下发生 argmax 翻转；稳定选定的 `B=4,C=512,KV=8` 配置在 FP16/BF16 的三个 attention backend 中均为 100%。
+- synthetic decode 中 Triton 相对 paged SDPA 的 decode step P50 中位数比值为 `0.841x`，即当前 Triton 约慢 18.9%；这是真实的“尚未胜过 PyTorch SDPA”结果，不把 attention-only 的局部收益包装成端到端收益。
+- 选定 `B=4,C=512,KV=8,FP16` 形状下，Triton append + Triton attention 的 device decode step P50 为约 `1.502 ms`，Torch append + Triton attention 为约 `1.670 ms`；仅作为组合路径示例，不能外推为普遍加速。
+
+### 面试时怎么讲
+
+1. 先说清楚这是模型无关 synthetic decoder，不冒充真实预训练模型；它的价值是把 cache、scheduler、append、attention 和 token 生成串成可测闭环。
+2. 说明为什么 attention-only Triton 可能胜过 paged gather + SDPA，但端到端 synthetic decoder 仍输给 paged SDPA：PyTorch SDPA backend 可能更成熟，且端到端包含投影、launch 和 Python/runtime 开销。
+3. 区分 logits `allclose` 与 greedy token 一致率：argmax 对小 margin 不连续，token mismatch 不必然表示数值实现错误。
+4. 强调下一步不是继续堆 synthetic 层数，而是解决 profiler counter 权限或接入真实小模型做 TTFT/TPOT 复测。

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from .cache import PagedKVCache
 from .scheduler import InferenceRequest, ScheduleBatch, TokenBudgetScheduler
+
+
+PrefillFn = Callable[[InferenceRequest, int, int], None]
+DecodeFn = Callable[[tuple[InferenceRequest, ...]], None]
 
 
 @dataclass(frozen=True)
@@ -23,9 +28,18 @@ class InferenceRuntime:
     budget, grow their KV block tables, and release blocks on completion.
     """
 
-    def __init__(self, cache: PagedKVCache, scheduler: TokenBudgetScheduler):
+    def __init__(
+        self,
+        cache: PagedKVCache,
+        scheduler: TokenBudgetScheduler,
+        *,
+        prefill_fn: PrefillFn | None = None,
+        decode_fn: DecodeFn | None = None,
+    ):
         self.cache = cache
         self.scheduler = scheduler
+        self.prefill_fn = prefill_fn
+        self.decode_fn = decode_fn
         self._requests: dict[int, InferenceRequest] = {}
 
     def submit(self, request_id: int, prompt_tokens: int, max_new_tokens: int) -> InferenceRequest:
@@ -44,14 +58,24 @@ class InferenceRuntime:
             request.block_table.extend(self.cache.allocator.allocate(missing, owner=request.request_id))
 
     def step(self) -> ScheduleBatch:
+        cached_tokens_before = {
+            id(request): request.cached_tokens for request in self._requests.values()
+        }
         batch = self.scheduler.schedule()
         if batch.phase == "prefill":
             for request in batch.requests:
                 self._ensure_capacity(request, max(1, request.cached_tokens))
+                if self.prefill_fn is not None:
+                    start_token = cached_tokens_before[id(request)]
+                    end_token = request.cached_tokens
+                    if start_token < end_token:
+                        self.prefill_fn(request, start_token, end_token)
         elif batch.phase == "decode":
             for request in batch.requests:
                 # Reserve the KV slot that the next model step will write.
                 self._ensure_capacity(request, request.prompt_tokens + request.generated_tokens + 1)
+            if self.decode_fn is not None:
+                self.decode_fn(batch.requests)
             self.scheduler.mark_decode_step(batch.requests)
             for request in batch.requests:
                 if request.finished:
