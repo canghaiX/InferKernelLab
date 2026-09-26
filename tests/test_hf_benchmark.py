@@ -90,19 +90,19 @@ def test_local_checkpoint_mode_rejects_missing_path(tmp_path):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
-@pytest.mark.parametrize("backend", ["paged_sdpa", "triton_paged"])
+@pytest.mark.parametrize("backend", ["paged_sdpa", "triton_paged", "triton_paged_grouped"])
 def test_random_llama_cuda_backends_report_latency_and_correctness(
     tmp_path,
     dtype,
     backend,
 ):
-    if backend == "triton_paged" and not triton_available():
+    if backend.startswith("triton_paged") and not triton_available():
         pytest.skip("requires Triton")
     args = _args(tmp_path, num_kv_heads=2, num_layers=2)
     args.device = "cuda"
     args.dtype = dtype
     args.backend = backend
-    args.append_backend = "triton" if backend == "triton_paged" else "torch"
+    args.append_backend = "triton" if backend.startswith("triton_paged") else "torch"
     record = run(args)
 
     assert record["correctness"]["status"] == "ok"

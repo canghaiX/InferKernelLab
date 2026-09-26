@@ -13,10 +13,19 @@ from .attention import paged_decode_attention, paged_decode_attention_sdpa
 from .cache import PagedKVCache
 from .runtime import InferenceRuntime
 from .scheduler import InferenceRequest, TokenBudgetScheduler
-from .triton_ops import paged_decode_attention_triton, triton_available
+from .triton_ops import (
+    paged_decode_attention_triton,
+    paged_decode_attention_triton_grouped,
+    triton_available,
+)
 
 
-_ATTENTION_BACKENDS = {"paged_reference", "paged_sdpa", "triton_paged"}
+_ATTENTION_BACKENDS = {
+    "paged_reference",
+    "paged_sdpa",
+    "triton_paged",
+    "triton_paged_grouped",
+}
 _APPEND_BACKENDS = {"torch", "triton"}
 
 
@@ -55,8 +64,8 @@ class SyntheticDecoderConfig:
             raise ValueError("num_blocks must be positive when provided")
         if device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA was requested but is unavailable")
-        if self.backend == "triton_paged" and device.type != "cuda":
-            raise ValueError("triton_paged requires a CUDA device")
+        if self.backend.startswith("triton_paged") and device.type != "cuda":
+            raise ValueError(f"{self.backend} requires a CUDA device")
         if self.append_backend == "triton" and device.type != "cuda":
             raise ValueError("triton append requires a CUDA device")
 
@@ -283,9 +292,19 @@ class SyntheticDecodeRunner:
         if self.config.backend == "paged_sdpa":
             return paged_decode_attention_sdpa(query, self.cache, tables, context_lengths)
         if not triton_available():
-            raise RuntimeError("triton_paged requires a CUDA device and an installed Triton backend")
+            raise RuntimeError(
+                f"{self.config.backend} requires a CUDA device and an installed Triton backend"
+            )
         table_tensor = self._block_tables(requests)
         length_tensor = torch.tensor(context_lengths, dtype=torch.int32, device=self.device)
+        if self.config.backend == "triton_paged_grouped":
+            return paged_decode_attention_triton_grouped(
+                query,
+                self.cache,
+                table_tensor,
+                length_tensor,
+                validate_inputs=True,
+            )
         return paged_decode_attention_triton(
             query,
             self.cache,

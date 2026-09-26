@@ -15,6 +15,9 @@ synthetic decoder 保留固定权重闭环；可选 Transformers adapter 进一�
 - 支持 MHA、GQA、MQA 的 PyTorch reference decode attention。
 - PyTorch SDPA dense baseline，以及 paged gather + SDPA baseline。
 - 可选 Triton paged decode attention 和 KV append kernel。
+- 可选 grouped GQA/MQA Triton paged attention：以 `(request, kv_head, query_group)`
+  为 program 映射，让同一 KV head 的 query-head group 共享 K/V tile；旧
+  `triton_paged` backend 保持不变。
 - 模型无关的单层 synthetic decoder：embedding、Q/K/V 投影、paged KV append、decode attention、输出投影和 greedy token 生成。
 - 可选 `Transformers/Llama` adapter：tiny random `LlamaConfig`、本地 checkpoint、
   多层 RMSNorm/RoPE/GQA、paged KV cache 和真实 decoder layer 手动执行。
@@ -90,7 +93,22 @@ python3 -m inferkernellab.hf_benchmark \
 `local_files_only=True`，不会隐式联网。设计说明见
 [`docs/hf_llama_adapter_design.md`](docs/hf_llama_adapter_design.md)。
 
+对 GQA/MQA 运行 grouped kernel A/B smoke：
+
+```bash
+./scripts/run_grouped_gqa_smoke.sh docs/benchmark_results/grouped_gqa_smoke.jsonl
+```
+
+该 backend 使用 `triton_paged_grouped` 显式 opt-in。结果必须先通过
+`paged_reference` correctness，再与 `triton_paged` 比较 decode P50/P95；如果某个 shape
+没有稳定收益，不会替换默认 backend。
+
 项目镜像需要本地存在 `nano-vllm:optimized`。如需其他基础镜像，可通过 `BASE_IMAGE` 覆盖；若基础镜像没有 `ncu`，profiling 脚本不会自动在宿主机安装工具。
+
+grouped GQA/MQA 的 A100 smoke 摘要见
+[`docs/benchmark_results/grouped_gqa_smoke.md`](docs/benchmark_results/grouped_gqa_smoke.md)，
+原始 12 条 JSONL 记录见
+[`docs/benchmark_results/grouped_gqa_smoke.jsonl`](docs/benchmark_results/grouped_gqa_smoke.jsonl)。
 
 ## 架构
 
@@ -98,7 +116,7 @@ python3 -m inferkernellab.hf_benchmark \
 src/inferkernellab/
   cache.py       物理 block allocator 与 paged KV 存储
   attention.py   PyTorch reference、dense SDPA、paged SDPA
-  triton_ops.py  Triton KV append 与 paged decode attention
+  triton_ops.py  Triton KV append、paged decode attention 与 grouped GQA/MQA kernel
   decode.py      单层 synthetic decoder 与端到端 decode runner
   hf_benchmark.py 可选 Transformers/Llama 多层 paged decode adapter
   scheduler.py   prefill/decode token-budget 调度示例

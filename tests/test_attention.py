@@ -10,7 +10,11 @@ from inferkernellab.attention import (
 )
 from inferkernellab.cache import PagedKVCache
 from inferkernellab.append import append_kv_triton, triton_append_available
-from inferkernellab.triton_ops import paged_decode_attention_triton, triton_available
+from inferkernellab.triton_ops import (
+    paged_decode_attention_triton,
+    paged_decode_attention_triton_grouped,
+    triton_available,
+)
 
 
 @pytest.mark.parametrize("num_heads,num_kv_heads", [(4, 4), (4, 2), (4, 1)])
@@ -76,6 +80,42 @@ def test_triton_attention_matches_reference(num_kv_heads, dtype):
     context_lens = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     actual = paged_decode_attention_triton(query, cache, block_tables, context_lens)
     tolerance = 2e-2 if dtype == torch.bfloat16 else 3e-3 if dtype == torch.float16 else 1e-4
+    assert torch.allclose(actual, expected, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.skipif(not triton_available(), reason="requires CUDA and Triton")
+@pytest.mark.parametrize("num_kv_heads", [8, 4, 1])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_grouped_triton_attention_matches_reference(num_kv_heads, dtype):
+    torch.manual_seed(7)
+    cache = PagedKVCache(
+        32,
+        8,
+        num_kv_heads,
+        16,
+        num_layers=2,
+        dtype=dtype,
+        device="cuda",
+    )
+    tables = [[13, 2, 9], [5, 14, 1]]
+    lengths = [19, 23]
+    for table, length in zip(tables, lengths):
+        key = torch.randn(length, num_kv_heads, 16, device="cuda", dtype=dtype)
+        value = torch.randn_like(key)
+        cache.write(1, table, 0, key, value)
+    query = torch.randn(2, 32, 16, device="cuda", dtype=dtype)
+    block_tables = torch.tensor(tables, dtype=torch.int32, device="cuda")
+    context_lens = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    expected = paged_decode_attention(query, cache, tables, lengths, layer=1)
+    actual = paged_decode_attention_triton_grouped(
+        query,
+        cache,
+        block_tables,
+        context_lens,
+        layer=1,
+        query_group_size=8,
+    )
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 3e-3
     assert torch.allclose(actual, expected, atol=tolerance, rtol=tolerance)
 
 

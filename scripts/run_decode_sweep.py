@@ -5,12 +5,17 @@ import argparse
 import json
 import platform
 import subprocess
+import sys
 from pathlib import Path
 from statistics import median
 
 import torch
 
 from inferkernellab.decode import DecodeRunResult, SyntheticDecodeRunner, SyntheticDecoderConfig
+from inferkernellab.triton_ops import (
+    paged_decode_autotune_config,
+    paged_decode_grouped_autotune_config,
+)
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -50,6 +55,33 @@ def _environment(device: torch.device) -> dict:
         "driver": _driver_version() if device.type == "cuda" else None,
         "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "compute_capability": list(torch.cuda.get_device_capability(device)) if device.type == "cuda" else None,
+    }
+
+
+def _provenance() -> dict:
+    repository = Path(__file__).resolve().parents[1]
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(repository), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        revision = None
+        dirty = None
+    return {
+        "git_revision": revision,
+        "git_dirty": dirty,
+        "command": " ".join(sys.argv),
     }
 
 
@@ -237,6 +269,7 @@ def _run_case(args: argparse.Namespace, backend: str, append_backend: str) -> di
         "schema_version": 1,
         "benchmark": "synthetic_single_layer_decode",
         "environment": _environment(device),
+        "provenance": _provenance(),
         "config": {
             "device": str(device),
             "dtype": args.dtype,
@@ -254,6 +287,18 @@ def _run_case(args: argparse.Namespace, backend: str, append_backend: str) -> di
         },
         "attention_backend": backend,
         "append_backend": append_backend,
+        "kernel_config": (
+            {
+                "kernel_variant": "grouped",
+                "query_group_size": min(8, args.num_heads // args.num_kv_heads),
+                "kv_reuse_factor": args.num_heads // args.num_kv_heads,
+                **(paged_decode_grouped_autotune_config() or {}),
+            }
+            if backend == "triton_paged_grouped"
+            else paged_decode_autotune_config()
+            if backend == "triton_paged"
+            else None
+        ),
         "comparison_reference": "paged_reference + torch append",
         "measurement": {
             "warmup": args.warmup,
@@ -311,7 +356,11 @@ def main() -> None:
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--backends", default="paged_reference,paged_sdpa,triton_paged")
+    parser.add_argument(
+        "--backends",
+        default="paged_reference,paged_sdpa,triton_paged",
+        help="comma-separated attention backends; triton_paged_grouped enables GQA/MQA reuse",
+    )
     parser.add_argument("--include-triton-append", action="store_true")
     args = parser.parse_args()
     if args.max_new_tokens <= 0 or args.warmup < 0 or args.repeats <= 0:
@@ -321,7 +370,12 @@ def main() -> None:
     if any(args.num_heads % num_kv_heads for num_kv_heads in args.num_kv_heads_list):
         parser.error("num-kv-heads-list values must divide num-heads")
     backends = [backend for backend in args.backends.split(",") if backend]
-    allowed = {"paged_reference", "paged_sdpa", "triton_paged"}
+    allowed = {
+        "paged_reference",
+        "paged_sdpa",
+        "triton_paged",
+        "triton_paged_grouped",
+    }
     if not backends or any(backend not in allowed for backend in backends):
         parser.error(f"backends must be selected from {sorted(allowed)}")
     dtype_names = [args.dtype] if args.dtype is not None else [item for item in args.dtypes.split(",") if item]
@@ -349,19 +403,24 @@ def main() -> None:
                             flush=True,
                         )
                         rows.append(_run_case(case_args, backend, "torch"))
-                    if args.include_triton_append and "triton_paged" in backends:
-                        case_args = argparse.Namespace(**vars(args))
-                        case_args.dtype = dtype_name
-                        case_args.batch_size = batch_size
-                        case_args.context_len = context_len
-                        case_args.num_kv_heads = num_kv_heads
-                        case_args.output = None
-                        print(
-                            f"running backend=triton_paged append=triton batch={batch_size} "
-                            f"context={context_len} kv_heads={num_kv_heads} dtype={dtype_name}",
-                            flush=True,
-                        )
-                        rows.append(_run_case(case_args, "triton_paged", "triton"))
+                    if args.include_triton_append:
+                        for triton_backend in (
+                            backend
+                            for backend in backends
+                            if backend in {"triton_paged", "triton_paged_grouped"}
+                        ):
+                            case_args = argparse.Namespace(**vars(args))
+                            case_args.dtype = dtype_name
+                            case_args.batch_size = batch_size
+                            case_args.context_len = context_len
+                            case_args.num_kv_heads = num_kv_heads
+                            case_args.output = None
+                            print(
+                                f"running backend={triton_backend} append=triton batch={batch_size} "
+                                f"context={context_len} kv_heads={num_kv_heads} dtype={dtype_name}",
+                                flush=True,
+                            )
+                            rows.append(_run_case(case_args, triton_backend, "triton"))
 
     with args.output.open("w", encoding="utf-8") as handle:
         for row in rows:

@@ -5,6 +5,7 @@ import json
 import math
 import platform
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,9 @@ from .runtime import InferenceRuntime
 from .scheduler import InferenceRequest, TokenBudgetScheduler
 from .triton_ops import (
     paged_decode_attention_triton,
+    paged_decode_attention_triton_grouped,
     paged_decode_autotune_config,
+    paged_decode_grouped_autotune_config,
     triton_available,
 )
 
@@ -122,7 +125,12 @@ class LlamaPagedDecodeRunner:
             raise ValueError("max_new_tokens must be positive")
         if block_size <= 0 or max_num_batched_tokens <= 0:
             raise ValueError("block-size and max-num-batched-tokens must be positive")
-        if backend not in {"paged_reference", "paged_sdpa", "triton_paged"}:
+        if backend not in {
+            "paged_reference",
+            "paged_sdpa",
+            "triton_paged",
+            "triton_paged_grouped",
+        }:
             raise ValueError(f"unsupported backend: {backend}")
         if append_backend not in {"torch", "triton"}:
             raise ValueError(f"unsupported append backend: {append_backend}")
@@ -135,8 +143,8 @@ class LlamaPagedDecodeRunner:
         vocab_size = int(model.config.vocab_size)
         if any(token < 0 or token >= vocab_size for prompt in self.prompts for token in prompt):
             raise ValueError("prompt token is outside the configured vocabulary")
-        if backend == "triton_paged" and not triton_available():
-            raise RuntimeError("triton_paged requires CUDA and an installed Triton backend")
+        if backend.startswith("triton_paged") and not triton_available():
+            raise RuntimeError(f"{backend} requires CUDA and an installed Triton backend")
         if append_backend == "triton" and not triton_append_available():
             raise RuntimeError("triton append requires CUDA and an installed Triton backend")
 
@@ -218,6 +226,15 @@ class LlamaPagedDecodeRunner:
                 layer=layer,
             )
         lengths = torch.tensor(context_lengths, dtype=torch.int32, device=self.device)
+        if self.backend == "triton_paged_grouped":
+            return paged_decode_attention_triton_grouped(
+                query,
+                self.cache,
+                tables,
+                torch.tensor(context_lengths, dtype=torch.int32, device=self.device),
+                layer=layer,
+                validate_inputs=True,
+            )
         return paged_decode_attention_triton(
             query,
             self.cache,
@@ -540,6 +557,33 @@ def _environment(device: torch.device) -> dict[str, Any]:
     }
 
 
+def _provenance() -> dict[str, Any]:
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(repository), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        revision = None
+        dirty = None
+    return {
+        "git_revision": revision,
+        "git_dirty": dirty,
+        "command": " ".join(sys.argv),
+    }
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.iterations < 1 or args.warmup < 0:
         raise ValueError("iterations must be positive and warmup cannot be negative")
@@ -586,6 +630,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     decode_samples = [sample for item in runs for sample in item.decode_step_wall_ms]
     kv_memory = max(item.peak_kv_memory_bytes for item in runs)
     peak_memory = max(item.peak_memory_allocated_bytes for item in runs)
+    kernel_config = None
+    if args.backend == "triton_paged_grouped":
+        reuse_factor = int(model.config.num_attention_heads) // int(model.config.num_key_value_heads)
+        kernel_config = {
+            "kernel_variant": "grouped",
+            "query_group_size": min(8, reuse_factor),
+            "kv_reuse_factor": reuse_factor,
+            **(paged_decode_grouped_autotune_config() or {}),
+        }
+    elif args.backend == "triton_paged":
+        kernel_config = paged_decode_autotune_config()
     record = {
         "schema_version": 1,
         "benchmark": "llama_paged_decode",
@@ -625,10 +680,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "no_implicit_download": True,
             "oracle_path": "Transformers eager full-sequence reference",
         },
-        "kernel_config": (
-            paged_decode_autotune_config() if args.backend == "triton_paged" else None
-        ),
+        "kernel_config": kernel_config,
         "environment": _environment(device),
+        "provenance": _provenance(),
         "limitations": [
             "Llama/Llama-like decoder only",
             "no quantization, tensor parallel, or streaming server",
@@ -654,7 +708,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--dtype", choices=("float32", "float16", "bfloat16"), default="bfloat16"
     )
     parser.add_argument(
-        "--backend", choices=("paged_reference", "paged_sdpa", "triton_paged"), default="paged_sdpa"
+        "--backend",
+        choices=("paged_reference", "paged_sdpa", "triton_paged", "triton_paged_grouped"),
+        default="paged_sdpa",
     )
     parser.add_argument("--append-backend", choices=("torch", "triton"), default="torch")
     parser.add_argument("--batch-size", type=int, default=2)

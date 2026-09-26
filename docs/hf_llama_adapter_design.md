@@ -20,7 +20,7 @@ layer it performs:
 1. embedding and RMSNorm;
 2. Q/K/V projection and Transformers-compatible RoPE;
 3. per-layer K/V write into logical request positions;
-4. paged reference, paged SDPA, or Triton attention over the layer's cache;
+4. paged reference, paged SDPA, Triton attention, or grouped GQA/MQA Triton attention over the layer's cache;
 5. output projection, residual, RMSNorm, gated SiLU MLP, and residual.
 
 The cache layout is `[layer, physical_block, token_in_block, kv_head, head_dim]`.
