@@ -8,6 +8,7 @@ from .scheduler import InferenceRequest, ScheduleBatch, TokenBudgetScheduler
 
 
 PrefillFn = Callable[[InferenceRequest, int, int], None]
+PrefillBatchFn = Callable[[tuple[InferenceRequest, ...], tuple[int, ...], tuple[int, ...]], None]
 DecodeFn = Callable[[tuple[InferenceRequest, ...]], None]
 
 
@@ -34,11 +35,15 @@ class InferenceRuntime:
         scheduler: TokenBudgetScheduler,
         *,
         prefill_fn: PrefillFn | None = None,
+        prefill_batch_fn: PrefillBatchFn | None = None,
         decode_fn: DecodeFn | None = None,
     ):
+        if prefill_fn is not None and prefill_batch_fn is not None:
+            raise ValueError("prefill_fn and prefill_batch_fn are mutually exclusive")
         self.cache = cache
         self.scheduler = scheduler
         self.prefill_fn = prefill_fn
+        self.prefill_batch_fn = prefill_batch_fn
         self.decode_fn = decode_fn
         self._requests: dict[int, InferenceRequest] = {}
 
@@ -63,13 +68,28 @@ class InferenceRuntime:
         }
         batch = self.scheduler.schedule()
         if batch.phase == "prefill":
+            prefill_requests = []
+            prefill_starts = []
+            prefill_ends = []
             for request in batch.requests:
                 self._ensure_capacity(request, max(1, request.cached_tokens))
-                if self.prefill_fn is not None:
-                    start_token = cached_tokens_before[id(request)]
-                    end_token = request.cached_tokens
-                    if start_token < end_token:
-                        self.prefill_fn(request, start_token, end_token)
+                start_token = cached_tokens_before[id(request)]
+                end_token = request.cached_tokens
+                if start_token < end_token:
+                    prefill_requests.append(request)
+                    prefill_starts.append(start_token)
+                    prefill_ends.append(end_token)
+            if prefill_requests and self.prefill_batch_fn is not None:
+                self.prefill_batch_fn(
+                    tuple(prefill_requests),
+                    tuple(prefill_starts),
+                    tuple(prefill_ends),
+                )
+            elif self.prefill_fn is not None:
+                for request, start_token, end_token in zip(
+                    prefill_requests, prefill_starts, prefill_ends
+                ):
+                    self.prefill_fn(request, start_token, end_token)
         elif batch.phase == "decode":
             for request in batch.requests:
                 # Reserve the KV slot that the next model step will write.

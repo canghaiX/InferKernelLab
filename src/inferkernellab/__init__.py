@@ -8,6 +8,7 @@ from .attention import (
     dense_decode_attention_sdpa_tensor_batch,
     paged_decode_attention,
     paged_decode_attention_sdpa,
+    paged_prefill_attention_sdpa,
 )
 from .append import append_kv_triton
 from .cache import BlockAllocator, PagedKVCache
@@ -32,5 +33,6 @@ __all__ = [
     "dense_decode_attention_sdpa_batch",
     "dense_decode_attention_sdpa_tensor_batch",
     "paged_decode_attention_sdpa",
+    "paged_prefill_attention_sdpa",
     "append_kv_triton",
 ]

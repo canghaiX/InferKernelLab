@@ -153,6 +153,41 @@ class PagedKVCache:
         self.k[layer, block_ids, offsets, :, :] = key
         self.v[layer, block_ids, offsets, :, :] = value
 
+    def write_slots(
+        self,
+        layer: int,
+        slots: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        validate_slots: bool = True,
+    ) -> None:
+        """Write flattened token states using physical cache slots."""
+        if key.shape != value.shape or key.ndim != 3:
+            raise ValueError("key/value must have the same [T, H, D] shape")
+        if slots.ndim != 1 or slots.numel() != key.shape[0]:
+            raise ValueError("slots must have one entry per key/value token")
+        if key.shape[1:] != (self.layout.num_kv_heads, self.layout.head_dim):
+            raise ValueError("key/value shape does not match cache layout")
+        if not 0 <= layer < self.layout.num_layers:
+            raise IndexError("layer is out of range")
+        if slots.device != self.device:
+            slots = slots.to(self.device)
+        if key.device != self.device:
+            key = key.to(self.device)
+        if value.device != self.device:
+            value = value.to(self.device)
+        slots = slots.to(dtype=torch.long)
+        if validate_slots and slots.numel():
+            if bool((slots < 0).any()) or bool(
+                (slots >= self.layout.num_blocks * self.layout.block_size).any()
+            ):
+                raise ValueError("slots contain an invalid physical cache position")
+        block_ids = torch.div(slots, self.layout.block_size, rounding_mode="floor")
+        offsets = slots.remainder(self.layout.block_size)
+        self.k[layer, block_ids, offsets, :, :] = key
+        self.v[layer, block_ids, offsets, :, :] = value
+
     def read(self, layer: int, block_table: list[int], length: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Read the first ``length`` logical tokens in order."""
         if length < 0:

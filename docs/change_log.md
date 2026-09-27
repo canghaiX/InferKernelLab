@@ -77,3 +77,19 @@
 - grouped 相对旧 `triton_paged` 的最新 8 个 shape 中，仅 `B=16,C=128,KV=8` 约快 `0.8%`，其余 shape 持平或变慢；因此 grouped 继续显式 opt-in，不宣称稳定 10% 加速。
 - 多层 tiny Llama HF 对照中，old/grouped logits 最大误差均为 `7.93e-4`、token match `100%`；当前配置 decode P50 分别为 `3.653 ms` 与 `3.666 ms`，说明端到端仍近乎持平。
 - 具体 clean benchmark 结果写入 `docs/benchmark_results/grouped_gqa_tensorcore_20260927.*`；旧 `grouped_gqa_smoke.*` 结果保留不覆盖。
+
+## 2026-09-27：HF Llama 与 synthetic batched Prefill
+
+### 改动点
+
+- **runtime 批量 hook**：增加 `prefill_batch_fn(requests, starts, ends)`，按 scheduler token budget 一次交付一个 Prefill batch；旧 `prefill_fn` 调用方式保持兼容，两个 callback 同时配置会显式报错。
+- **HF causal Prefill**：新增 ragged token padding、批量 embedding/QKV/RoPE/MLP、flattened paged KV 写入和 causal SDPA；兼容 MHA/GQA/MQA 以及跨 block prompt。
+- **synthetic Prefill**：合并 prompt Q/K/V 投影和 cache 写入，结果中记录 Prefill mode、batch count、有效 token、padding token 与 P50/P95。
+- **正确性口径**：HF 路径继续使用 Transformers eager full-sequence oracle；BF16 使用 dtype-aware `3e-2` logits tolerance，并要求 greedy token match 与 cache release。
+
+### 验证与实测
+
+- 全量 pytest：`71 passed`。
+- clean commit `afd68e9`、A100、BF16、2-layer tiny Llama、`paged_sdpa`、warmup 10、iterations 50：B2×C128 Prefill `747.876 -> 4.694 ms`，B4×C512 `6009.891 -> 5.623 ms`，几何平均加速 `412.7x`。
+- 四组 A/B 记录均 correctness `ok`、token match `100%`、cache released；decode P50 基本不变，收益来自消除逐 token Prefill dispatch。
+- 详细摘要见 `docs/benchmark_results/prefill_ab_afd68e9.*`；不把目标值表述为普遍线上 serving 加速。

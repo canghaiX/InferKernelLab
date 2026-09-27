@@ -14,7 +14,11 @@ from typing import Any, Sequence
 import torch
 
 from .append import append_kv_triton, triton_append_available
-from .attention import paged_decode_attention, paged_decode_attention_sdpa
+from .attention import (
+    paged_decode_attention,
+    paged_decode_attention_sdpa,
+    paged_prefill_attention_sdpa,
+)
 from .cache import PagedKVCache
 from .runtime import InferenceRuntime
 from .scheduler import InferenceRequest, TokenBudgetScheduler
@@ -97,6 +101,11 @@ class LlamaPagedRunResult:
     peak_kv_memory_bytes: int
     used_blocks_peak: int
     cache_released: bool
+    prefill_step_wall_ms: tuple[float, ...] = ()
+    prefill_mode: str = "token"
+    prefill_batch_count: int = 0
+    prefill_tokens: int = 0
+    prefill_padding_tokens: int = 0
 
     @property
     def decode_p50_ms(self) -> float:
@@ -105,6 +114,14 @@ class LlamaPagedRunResult:
     @property
     def decode_p95_ms(self) -> float:
         return _percentile(self.decode_step_wall_ms, 0.95)
+
+    @property
+    def prefill_p50_ms(self) -> float:
+        return _percentile(self.prefill_step_wall_ms, 0.50)
+
+    @property
+    def prefill_p95_ms(self) -> float:
+        return _percentile(self.prefill_step_wall_ms, 0.95)
 
 
 class LlamaPagedDecodeRunner:
@@ -120,6 +137,7 @@ class LlamaPagedDecodeRunner:
         block_size: int,
         append_backend: str = "torch",
         max_num_batched_tokens: int = 2048,
+        prefill_mode: str = "batched",
     ) -> None:
         if not prompts:
             raise ValueError("at least one prompt is required")
@@ -136,6 +154,8 @@ class LlamaPagedDecodeRunner:
             raise ValueError(f"unsupported backend: {backend}")
         if append_backend not in {"torch", "triton"}:
             raise ValueError(f"unsupported append backend: {append_backend}")
+        if prefill_mode not in {"batched", "token"}:
+            raise ValueError("prefill_mode must be batched or token")
         self.model = model
         self.device = next(model.parameters()).device
         self.dtype = next(model.parameters()).dtype
@@ -152,6 +172,7 @@ class LlamaPagedDecodeRunner:
 
         self.backend = backend
         self.append_backend = append_backend
+        self.prefill_mode = prefill_mode
         self.max_new_tokens = max_new_tokens
         self.prompt_lengths = tuple(len(prompt) for prompt in self.prompts)
         self.num_layers = int(model.config.num_hidden_layers)
@@ -180,7 +201,8 @@ class LlamaPagedDecodeRunner:
         self.runtime = InferenceRuntime(
             self.cache,
             scheduler,
-            prefill_fn=self._prefill,
+            prefill_fn=self._prefill if prefill_mode == "token" else None,
+            prefill_batch_fn=self._prefill_batch if prefill_mode == "batched" else None,
             decode_fn=self._decode,
         )
         self.requests = [
@@ -208,6 +230,7 @@ class LlamaPagedDecodeRunner:
         self._prompt_logits: dict[int, torch.Tensor] = {}
         self._next_logits: dict[int, torch.Tensor] = {}
         self._decode_logits: list[torch.Tensor] = []
+        self._prefill_padding_tokens = 0
         self._generated: dict[int, list[int]] = {
             request.request_id: [] for request in self.requests
         }
@@ -313,6 +336,43 @@ class LlamaPagedDecodeRunner:
         ).to(torch.int32)
         append_kv_triton(key, value, self.cache, slots, layer=layer)
 
+    def _write_kv_ranges(
+        self,
+        layer: int,
+        requests: Sequence[InferenceRequest],
+        starts: Sequence[int],
+        ends: Sequence[int],
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> None:
+        if len(requests) != len(starts) or len(requests) != len(ends):
+            raise ValueError("requests and prefill ranges must have matching lengths")
+        lengths = [int(end) - int(start) for start, end in zip(starts, ends)]
+        if any(length <= 0 for length in lengths):
+            raise ValueError("prefill ranges must be non-empty")
+        if key.shape != value.shape or key.ndim != 4:
+            raise ValueError("prefill key/value must have shape [B,Hkv,T,D]")
+        if sum(lengths) == 0 or key.shape[0] != len(requests):
+            raise ValueError("prefill key/value batch does not match requests")
+        if key.shape[2] < max(lengths):
+            raise ValueError("prefill key/value width is smaller than a request range")
+        key_flat = torch.cat(
+            [key[row, :, :length, :].permute(1, 0, 2) for row, length in enumerate(lengths)]
+        ).contiguous()
+        value_flat = torch.cat(
+            [value[row, :, :length, :].permute(1, 0, 2) for row, length in enumerate(lengths)]
+        ).contiguous()
+        slots = torch.cat(
+            [
+                self.cache.slot_mapping(request.block_table, start, length)
+                for request, start, length in zip(requests, starts, lengths)
+            ]
+        ).to(torch.int32)
+        if self.append_backend == "torch":
+            self.cache.write_slots(layer, slots, key_flat, value_flat, validate_slots=False)
+            return
+        append_kv_triton(key_flat, value_flat, self.cache, slots, layer=layer)
+
     def _forward_batch(
         self,
         token_ids: torch.Tensor,
@@ -361,6 +421,63 @@ class LlamaPagedDecodeRunner:
         hidden = self.model.model.norm(hidden)
         return self.model.lm_head(hidden).squeeze(1)
 
+    def _forward_prefill_batch(
+        self,
+        token_ids: torch.Tensor,
+        requests: Sequence[InferenceRequest],
+        starts: Sequence[int],
+        ends: Sequence[int],
+    ) -> torch.Tensor:
+        if token_ids.ndim != 2 or token_ids.shape[0] != len(requests):
+            raise ValueError("prefill token_ids must have shape [B,T]")
+        lengths = [int(end) - int(start) for start, end in zip(starts, ends)]
+        if any(length <= 0 for length in lengths):
+            raise ValueError("prefill ranges must be non-empty")
+        if token_ids.shape[1] < max(lengths):
+            raise ValueError("prefill token_ids width is smaller than a request range")
+        tables, _ = self._metadata_tensors(requests, ends)
+        hidden = self.model.model.embed_tokens(token_ids.to(dtype=torch.long))
+        position_ids = torch.arange(token_ids.shape[1], device=self.device).view(1, -1)
+        position_ids = position_ids + torch.as_tensor(
+            starts, dtype=torch.long, device=self.device
+        ).view(-1, 1)
+        for layer_index, layer in enumerate(self.model.model.layers):
+            residual = hidden
+            hidden = layer.input_layernorm(hidden)
+            query = layer.self_attn.q_proj(hidden).view(
+                hidden.shape[0], hidden.shape[1], self.num_heads, self.head_dim
+            ).transpose(1, 2)
+            key = layer.self_attn.k_proj(hidden).view(
+                hidden.shape[0], hidden.shape[1], self.num_kv_heads, self.head_dim
+            ).transpose(1, 2)
+            value = layer.self_attn.v_proj(hidden).view(
+                hidden.shape[0], hidden.shape[1], self.num_kv_heads, self.head_dim
+            ).transpose(1, 2)
+            cos, sin = self.model.model.rotary_emb(hidden, position_ids)
+            query, key = _apply_rotary(query, key, cos, sin)
+            self._write_kv_ranges(layer_index, requests, starts, ends, key, value)
+            attended = paged_prefill_attention_sdpa(
+                query,
+                self.cache,
+                tables,
+                starts,
+                ends,
+                layer=layer_index,
+            )
+            attended = attended.transpose(1, 2).reshape(
+                hidden.shape[0], hidden.shape[1], self.num_heads * self.head_dim
+            )
+            hidden = residual + layer.self_attn.o_proj(attended)
+            residual = hidden
+            hidden = layer.post_attention_layernorm(hidden)
+            hidden = layer.mlp.down_proj(
+                layer.mlp.act_fn(layer.mlp.gate_proj(hidden))
+                * layer.mlp.up_proj(hidden)
+            )
+            hidden = residual + hidden
+        hidden = self.model.model.norm(hidden)
+        return self.model.lm_head(hidden)
+
     def _prefill(self, request: InferenceRequest, start_token: int, end_token: int) -> None:
         prompt = self.prompts[request.request_id]
         for position in range(start_token, end_token):
@@ -369,6 +486,33 @@ class LlamaPagedDecodeRunner:
             if position == len(prompt) - 1:
                 self._prompt_logits[request.request_id] = logits.detach()
                 self._next_logits[request.request_id] = logits.detach()
+
+    def _prefill_batch(
+        self,
+        requests: tuple[InferenceRequest, ...],
+        starts: tuple[int, ...],
+        ends: tuple[int, ...],
+    ) -> None:
+        lengths = [int(end) - int(start) for start, end in zip(starts, ends)]
+        if not requests or any(length <= 0 for length in lengths):
+            raise ValueError("prefill batch must contain non-empty ranges")
+        width = max(lengths)
+        token_ids = torch.zeros(
+            (len(requests), width), dtype=torch.long, device=self.device
+        )
+        for row, (request, start, end) in enumerate(zip(requests, starts, ends)):
+            token_ids[row, : end - start] = torch.as_tensor(
+                self.prompts[request.request_id][start:end],
+                dtype=torch.long,
+                device=self.device,
+            )
+        self._prefill_padding_tokens += len(requests) * width - sum(lengths)
+        logits = self._forward_prefill_batch(token_ids, requests, starts, ends)
+        for row, (request, end, length) in enumerate(zip(requests, ends, lengths)):
+            if end == len(self.prompts[request.request_id]):
+                final_logits = logits[row, length - 1].detach()
+                self._prompt_logits[request.request_id] = final_logits
+                self._next_logits[request.request_id] = final_logits
 
     def _decode(self, requests: tuple[InferenceRequest, ...]) -> None:
         used_logits = torch.stack(
@@ -397,6 +541,7 @@ class LlamaPagedDecodeRunner:
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
         prefill_ms = 0.0
+        prefill_step_ms: list[float] = []
         decode_ms: list[float] = []
         used_blocks_peak = self.cache.allocator.num_used_blocks
         try:
@@ -406,6 +551,7 @@ class LlamaPagedDecodeRunner:
                     used_blocks_peak = max(used_blocks_peak, self.cache.allocator.num_used_blocks)
                     if batch.phase == "prefill":
                         prefill_ms += elapsed_ms
+                        prefill_step_ms.append(elapsed_ms)
                     elif batch.phase == "decode":
                         decode_ms.append(elapsed_ms)
                     elif batch.phase == "idle":
@@ -449,6 +595,11 @@ class LlamaPagedDecodeRunner:
             ).float().cpu(),
             decode_logits=tuple(self._decode_logits),
             prefill_wall_ms=prefill_ms,
+            prefill_step_wall_ms=tuple(prefill_step_ms),
+            prefill_mode=self.prefill_mode,
+            prefill_batch_count=len(prefill_step_ms),
+            prefill_tokens=sum(self.prompt_lengths),
+            prefill_padding_tokens=self._prefill_padding_tokens,
             decode_step_wall_ms=tuple(decode_ms),
             ttft_wall_ms=prefill_ms + decode_ms[0],
             tpot_wall_ms=sum(decode_ms) / len(decode_ms),
@@ -533,14 +684,13 @@ def _oracle_logits(
 ) -> tuple[torch.Tensor, ...]:
     outputs = []
     for step in range(len(generated_tokens[0]) + 1):
-        sequences = [
-            tuple(prompt) + tuple(tokens[:step])
-            for prompt, tokens in zip(prompts, generated_tokens)
-        ]
-        input_ids = torch.tensor(sequences, dtype=torch.long, device=device)
         with torch.inference_mode():
-            logits = model(input_ids, use_cache=False, return_dict=True).logits[:, -1, :]
-        outputs.append(logits.float().cpu())
+            logits = []
+            for prompt, tokens in zip(prompts, generated_tokens):
+                sequence = tuple(prompt) + tuple(tokens[:step])
+                input_ids = torch.tensor([sequence], dtype=torch.long, device=device)
+                logits.append(model(input_ids, use_cache=False, return_dict=True).logits[0, -1, :])
+        outputs.append(torch.stack(logits).float().cpu())
     return tuple(outputs)
 
 
@@ -567,6 +717,14 @@ def _correctness(
     )
     matches = int((manual_tokens == reference_tokens).sum().item())
     total_tokens = int(reference_tokens.numel())
+    dtype = next(model.parameters()).dtype
+    tolerance = (
+        3e-2
+        if dtype == torch.bfloat16
+        else 5e-3
+        if dtype == torch.float16
+        else 1e-4
+    )
     return {
         "logits_max_error": max(max_errors),
         "prefill_logits_max_error": max_errors[0],
@@ -574,7 +732,8 @@ def _correctness(
         "token_match_rate": matches / max(total_tokens, 1),
         "token_matches": matches,
         "token_count": total_tokens,
-        "status": "ok" if max(max_errors) <= 5e-3 and matches == total_tokens else "failed",
+        "logits_tolerance": tolerance,
+        "status": "ok" if max(max_errors) <= tolerance and matches == total_tokens else "failed",
         "oracle": "Transformers Llama eager full-sequence path",
     }
 
@@ -638,6 +797,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if model_source not in {"random", "path"}:
         raise ValueError("model-source must be random or path")
     args.model_source = model_source
+    prefill_mode = getattr(args, "prefill_mode", "batched")
+    if prefill_mode not in {"batched", "token"}:
+        raise ValueError("prefill-mode must be batched or token")
     device = _resolve_device(args.device)
     dtype = _dtype(args.dtype)
     model, source = _load_model(args, device, dtype)
@@ -659,6 +821,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             block_size=args.block_size,
             append_backend=args.append_backend,
             max_num_batched_tokens=args.max_num_batched_tokens,
+            prefill_mode=prefill_mode,
         )
         return runner.run()
 
@@ -671,6 +834,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if correctness["status"] != "ok":
         raise RuntimeError(f"Llama paged correctness failed: {correctness}")
     decode_samples = [sample for item in runs for sample in item.decode_step_wall_ms]
+    prefill_samples = [sample for item in runs for sample in item.prefill_step_wall_ms]
     kv_memory = max(item.peak_kv_memory_bytes for item in runs)
     peak_memory = max(item.peak_memory_allocated_bytes for item in runs)
     kernel_config = None
@@ -718,6 +882,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "logits_max_error": correctness["logits_max_error"],
         "token_match_rate": correctness["token_match_rate"],
         "prefill_latency_ms": sum(item.prefill_wall_ms for item in runs) / len(runs),
+        "prefill_p50_ms": _percentile(prefill_samples, 0.50),
+        "prefill_p95_ms": _percentile(prefill_samples, 0.95),
+        "prefill_mode": prefill_mode,
+        "prefill_batch_count": max(item.prefill_batch_count for item in runs),
+        "prefill_tokens": max(item.prefill_tokens for item in runs),
+        "prefill_padding_tokens": max(item.prefill_padding_tokens for item in runs),
         "decode_p50_ms": _percentile(decode_samples, 0.50),
         "decode_p95_ms": _percentile(decode_samples, 0.95),
         "ttft_ms": sum(item.ttft_wall_ms for item in runs) / len(runs),
@@ -730,6 +900,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "config": {
             "block_size": args.block_size,
             "max_num_batched_tokens": args.max_num_batched_tokens,
+            "prefill_mode": prefill_mode,
             "warmup": args.warmup,
             "iterations": args.iterations,
             "seed": args.seed,
@@ -777,6 +948,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048)
+    parser.add_argument(
+        "--prefill-mode",
+        choices=("batched", "token"),
+        default="batched",
+        help="batched causal SDPA Prefill or the token-by-token regression baseline",
+    )
     parser.add_argument("--vocab-size", type=int, default=1024)
     parser.add_argument("--hidden-size", type=int, default=256)
     parser.add_argument("--intermediate-size", type=int, default=704)

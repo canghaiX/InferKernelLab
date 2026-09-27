@@ -1,0 +1,37 @@
+{
+  "benchmark": "llama_batched_prefill_ab",
+  "commit": "afd68e9a907e7b0ea5bab144fb120c989e5c47c2",
+  "environment": {
+    "gpu": "NVIDIA A100-SXM4-40GB",
+    "cuda_runtime": "12.4",
+    "torch": "2.6.0+cu124",
+    "dtype": "bfloat16",
+    "backend": "paged_sdpa",
+    "warmup": 10,
+    "iterations": 50
+  },
+  "correctness": {
+    "all_status_ok": true,
+    "all_token_match_rate": 1.0,
+    "max_logits_error": 0.0078125,
+    "logits_tolerance": 0.03,
+    "cache_released": true
+  },
+  "results": [
+    {
+      "batch_size": 2,
+      "prompt_length": 128,
+      "token_prefill_ms": 747.8761853277683,
+      "batched_prefill_ms": 4.6936349011957645,
+      "prefill_speedup": 159.338
+    },
+    {
+      "batch_size": 4,
+      "prompt_length": 512,
+      "token_prefill_ms": 6009.890509285033,
+      "batched_prefill_ms": 5.623324299231172,
+      "prefill_speedup": 1068.74
+    }
+  ],
+  "geometric_mean_prefill_speedup": 412.664
+}

@@ -7,6 +7,7 @@ from inferkernellab.attention import (
     dense_decode_attention_sdpa_batch,
     paged_decode_attention,
     paged_decode_attention_sdpa,
+    paged_prefill_attention_sdpa,
 )
 from inferkernellab.cache import PagedKVCache
 from inferkernellab.append import append_kv_triton, triton_append_available
@@ -84,6 +85,35 @@ def test_sdpa_baselines_match_reference_with_ragged_paged_kv(num_kv_heads, dtype
     assert torch.allclose(dense_output, expected, atol=tolerance, rtol=tolerance)
     assert torch.allclose(paged_output, expected, atol=tolerance, rtol=tolerance)
     assert torch.allclose(paged_decode_attention(query, cache, tables, lengths), expected, atol=tolerance, rtol=tolerance)
+
+
+def test_paged_prefill_sdpa_matches_causal_dense_attention_with_ragged_ranges():
+    torch.manual_seed(11)
+    cache = PagedKVCache(24, 4, 2, 8, dtype=torch.float32)
+    tables = [[17, 3, 12], [5, 21, 8]]
+    starts = [0, 2]
+    ends = [5, 7]
+    query_width = 5
+    query = torch.randn(2, 4, query_width, 8)
+    expected = []
+    for table, start, end in zip(tables, starts, ends):
+        key = torch.randn(end, 2, 8)
+        value = torch.randn_like(key)
+        cache.write(0, table, 0, key, value)
+        row = []
+        for position in range(start, end):
+            row.append(
+                dense_decode_attention_sdpa_batch(
+                    query[len(expected): len(expected) + 1, :, position - start, :],
+                    [key[: position + 1]],
+                    [value[: position + 1]],
+                )[0]
+            )
+        expected.append(torch.stack(row))
+
+    actual = paged_prefill_attention_sdpa(query, cache, tables, starts, ends)
+    for row, length in enumerate((ends[0] - starts[0], ends[1] - starts[1])):
+        assert torch.allclose(actual[row, :, :length], expected[row].transpose(0, 1), atol=1e-5, rtol=1e-5)
 
 
 @pytest.mark.skipif(not triton_available(), reason="requires CUDA and Triton")

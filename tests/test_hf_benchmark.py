@@ -5,7 +5,7 @@ import torch
 
 pytest.importorskip("transformers")
 
-from inferkernellab.hf_benchmark import LlamaPagedDecodeRunner, _load_model, run
+from inferkernellab.hf_benchmark import LlamaPagedDecodeRunner, _correctness, _load_model, run
 from inferkernellab.triton_ops import triton_available
 
 
@@ -24,6 +24,7 @@ def _args(tmp_path, *, num_kv_heads: int, num_layers: int = 2) -> Namespace:
         iterations=1,
         block_size=4,
         max_num_batched_tokens=2048,
+        prefill_mode="batched",
         vocab_size=64,
         hidden_size=32,
         intermediate_size=64,
@@ -78,6 +79,41 @@ def test_random_llama_runner_prompt_crosses_block_boundary(tmp_path):
     assert result.used_blocks_peak >= 4
     assert result.cache_released
     assert runner.runtime.stats().used_blocks == 0
+
+
+@pytest.mark.parametrize("prefill_mode", ["token", "batched"])
+def test_random_llama_prefill_modes_match_eager(tmp_path, prefill_mode):
+    args = _args(tmp_path, num_kv_heads=2, num_layers=2)
+    args.prefill_mode = prefill_mode
+    result = run(args)
+
+    assert result["correctness"]["status"] == "ok"
+    assert result["prefill_mode"] == prefill_mode
+    assert result["prefill_tokens"] == args.batch_size * args.prompt_length
+    assert result["cache_released"] is True
+
+
+def test_random_llama_batched_prefill_handles_ragged_prompts(tmp_path):
+    args = _args(tmp_path, num_kv_heads=2, num_layers=2)
+    args.max_num_batched_tokens = 8
+    device = torch.device("cpu")
+    model, _ = _load_model(args, device, torch.float32)
+    prompts = ((1, 2, 3, 4, 5), (6, 7, 8))
+    batched = LlamaPagedDecodeRunner(
+        model,
+        prompts,
+        max_new_tokens=2,
+        backend="paged_sdpa",
+        block_size=4,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        prefill_mode="batched",
+    )
+    result = batched.run()
+    correctness = _correctness(model, prompts, result, device)
+
+    assert correctness["status"] == "ok"
+    assert result.prefill_padding_tokens > 0
+    assert result.cache_released
 
 
 def test_local_checkpoint_mode_rejects_missing_path(tmp_path):

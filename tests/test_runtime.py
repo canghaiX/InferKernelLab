@@ -1,3 +1,5 @@
+import pytest
+
 from inferkernellab.cache import PagedKVCache
 from inferkernellab.runtime import InferenceRuntime
 from inferkernellab.scheduler import TokenBudgetScheduler
@@ -46,3 +48,34 @@ def test_runtime_callbacks_receive_prefill_ranges_and_decode_before_accounting()
         ("decode", (0,)),
         ("decode", (1,)),
     ]
+
+
+def test_runtime_batch_prefill_callback_receives_one_event_per_schedule_batch():
+    cache = PagedKVCache(12, 4, 1, 2)
+    events = []
+
+    def prefill_batch(requests, starts, ends):
+        events.append((tuple(request.request_id for request in requests), starts, ends))
+
+    runtime = InferenceRuntime(
+        cache,
+        TokenBudgetScheduler(max_num_seqs=2, max_num_batched_tokens=8),
+        prefill_batch_fn=prefill_batch,
+    )
+    runtime.submit(3, prompt_tokens=4, max_new_tokens=1)
+    runtime.submit(7, prompt_tokens=3, max_new_tokens=1)
+
+    assert runtime.step().phase == "prefill"
+    assert runtime.step().phase == "decode"
+    assert events == [((3, 7), (0, 0), (4, 3))]
+
+
+def test_runtime_rejects_two_prefill_callback_shapes():
+    cache = PagedKVCache(4, 4, 1, 2)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        InferenceRuntime(
+            cache,
+            TokenBudgetScheduler(),
+            prefill_fn=lambda request, start, end: None,
+            prefill_batch_fn=lambda requests, starts, ends: None,
+        )

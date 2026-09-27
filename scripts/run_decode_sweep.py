@@ -157,6 +157,7 @@ def _run_once(
     max_num_batched_tokens: int,
     backend: str,
     append_backend: str,
+    prefill_mode: str,
 ) -> DecodeRunResult:
     config = SyntheticDecoderConfig(
         vocab_size=vocab_size,
@@ -171,6 +172,7 @@ def _run_once(
         append_backend=append_backend,
         max_num_seqs=max(batch_size, 32),
         max_num_batched_tokens=max_num_batched_tokens,
+        prefill_mode=prefill_mode,
     )
     return SyntheticDecodeRunner(
         config,
@@ -183,6 +185,12 @@ def _repeat_summary(result: DecodeRunResult) -> dict:
     return {
         "ttft_ms": result.ttft_wall_ms,
         "prefill_ms": result.prefill_wall_ms,
+        "prefill_p50_ms": result.prefill_p50_ms,
+        "prefill_p95_ms": result.prefill_p95_ms,
+        "prefill_mode": result.prefill_mode,
+        "prefill_batch_count": result.prefill_batch_count,
+        "prefill_tokens": result.prefill_tokens,
+        "prefill_padding_tokens": result.prefill_padding_tokens,
         "decode_step_p50_ms": result.decode_step_p50_ms,
         "decode_step_p95_ms": result.decode_step_p95_ms,
         "tpot_ms": result.tpot_wall_ms,
@@ -203,6 +211,11 @@ def _aggregate(repeats: list[dict]) -> dict:
     fields = (
         "ttft_ms",
         "prefill_ms",
+        "prefill_p50_ms",
+        "prefill_p95_ms",
+        "prefill_batch_count",
+        "prefill_tokens",
+        "prefill_padding_tokens",
         "decode_step_p50_ms",
         "decode_step_p95_ms",
         "tpot_ms",
@@ -261,6 +274,7 @@ def _run_case(args: argparse.Namespace, backend: str, append_backend: str) -> di
         "vocab_size": args.vocab_size,
         "seed": args.seed,
         "max_num_batched_tokens": args.max_num_batched_tokens,
+        "prefill_mode": args.prefill_mode,
     }
 
     for _ in range(args.warmup):
@@ -311,6 +325,7 @@ def _run_case(args: argparse.Namespace, backend: str, append_backend: str) -> di
             "block_size": args.block_size,
             "seed": args.seed,
             "max_num_batched_tokens": args.max_num_batched_tokens,
+            "prefill_mode": args.prefill_mode,
             "block_table_layout": "logical blocks are allocated round-robin across requests with reserved physical blocks between rounds",
         },
         "attention_backend": backend,
@@ -377,6 +392,12 @@ def main() -> None:
     parser.add_argument("--vocab-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048)
+    parser.add_argument(
+        "--prefill-mode",
+        choices=("batched", "token"),
+        default="batched",
+        help="batched packed KV projection or token-by-token regression baseline",
+    )
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(

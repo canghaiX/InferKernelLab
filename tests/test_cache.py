@@ -31,6 +31,18 @@ def test_write_and_read_preserve_logical_order():
     assert torch.equal(read_value[2:], value)
 
 
+def test_write_slots_preserves_logical_order_for_flattened_ranges():
+    cache = PagedKVCache(8, 4, 2, 3, dtype=torch.float32)
+    table = [6, 2, 5]
+    slots = torch.cat((cache.slot_mapping(table, 0, 2), cache.slot_mapping(table, 4, 2)))
+    key = torch.arange(24, dtype=torch.float32).view(4, 2, 3)
+    value = key + 100
+    cache.write_slots(0, slots, key, value)
+    read_key, read_value = cache.read(0, table, 6)
+    assert torch.equal(read_key[[0, 1, 4, 5]], key)
+    assert torch.equal(read_value[[0, 1, 4, 5]], value)
+
+
 def test_allocator_releases_blocks():
     cache = PagedKVCache(4, 4, 1, 2, dtype=torch.float32)
     table = cache.allocate_request(7, 5)

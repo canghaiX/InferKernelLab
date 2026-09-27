@@ -44,6 +44,7 @@ class SyntheticDecoderConfig:
     max_num_seqs: int = 32
     max_num_batched_tokens: int = 2048
     num_blocks: int | None = None
+    prefill_mode: str = "batched"
 
     def __post_init__(self) -> None:
         device = torch.device(self.device)
@@ -60,6 +61,8 @@ class SyntheticDecoderConfig:
             raise ValueError(f"unsupported append backend: {self.append_backend}")
         if self.max_num_seqs <= 0 or self.max_num_batched_tokens <= 0:
             raise ValueError("scheduler limits must be positive")
+        if self.prefill_mode not in {"batched", "token"}:
+            raise ValueError("prefill_mode must be batched or token")
         if self.num_blocks is not None and self.num_blocks <= 0:
             raise ValueError("num_blocks must be positive when provided")
         if device.type == "cuda" and not torch.cuda.is_available():
@@ -92,6 +95,11 @@ class DecodeRunResult:
     end_to_end_device_tokens_per_sec: float
     peak_memory_allocated_bytes: int
     used_blocks_peak: int
+    prefill_step_wall_ms: tuple[float, ...] = ()
+    prefill_mode: str = "token"
+    prefill_batch_count: int = 0
+    prefill_tokens: int = 0
+    prefill_padding_tokens: int = 0
 
     @property
     def decode_step_p50_ms(self) -> float:
@@ -108,6 +116,14 @@ class DecodeRunResult:
     @property
     def decode_step_device_p95_ms(self) -> float:
         return _percentile(self.decode_step_device_ms, 0.95)
+
+    @property
+    def prefill_p50_ms(self) -> float:
+        return _percentile(self.prefill_step_wall_ms, 0.50)
+
+    @property
+    def prefill_p95_ms(self) -> float:
+        return _percentile(self.prefill_step_wall_ms, 0.95)
 
 
 @dataclass(frozen=True)
@@ -190,7 +206,8 @@ class SyntheticDecodeRunner:
         self.runtime = InferenceRuntime(
             self.cache,
             scheduler,
-            prefill_fn=self._prefill,
+            prefill_fn=self._prefill if config.prefill_mode == "token" else None,
+            prefill_batch_fn=self._prefill_batch if config.prefill_mode == "batched" else None,
             decode_fn=self._decode,
         )
         self.requests: list[InferenceRequest] = [
@@ -294,6 +311,52 @@ class SyntheticDecodeRunner:
         )
         key, value = self._project_kv(token_ids)
         self._append_to_cache(request, start_token, key, value)
+
+    def _append_ranges(
+        self,
+        requests: Sequence[InferenceRequest],
+        starts: Sequence[int],
+        ends: Sequence[int],
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> None:
+        if len(requests) != len(starts) or len(requests) != len(ends):
+            raise ValueError("requests and prefill ranges must have matching lengths")
+        lengths = [end - start for start, end in zip(starts, ends)]
+        if any(length <= 0 for length in lengths):
+            raise ValueError("prefill ranges must be non-empty")
+        if sum(lengths) != key.shape[0] or key.shape != value.shape:
+            raise ValueError("flattened KV does not match prefill ranges")
+        slots = torch.cat(
+            [
+                self.cache.slot_mapping(request.block_table, start, length)
+                for request, start, length in zip(requests, starts, lengths)
+            ]
+        ).to(torch.int32)
+        if self.config.append_backend == "torch":
+            self.cache.write_slots(0, slots, key, value, validate_slots=False)
+            return
+        if not triton_append_available():
+            raise RuntimeError("triton append requires a CUDA device and an installed Triton backend")
+        append_kv_triton(key, value, self.cache, slots)
+
+    def _prefill_batch(
+        self,
+        requests: tuple[InferenceRequest, ...],
+        starts: tuple[int, ...],
+        ends: tuple[int, ...],
+    ) -> None:
+        token_ids = torch.tensor(
+            [
+                token
+                for request, start, end in zip(requests, starts, ends)
+                for token in self.prompts[request.request_id][start:end]
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
+        key, value = self._project_kv(token_ids)
+        self._append_ranges(requests, starts, ends, key, value)
 
     def _metadata_tensors(
         self,
@@ -461,6 +524,7 @@ class SyntheticDecodeRunner:
 
         prefill_wall_ms = 0.0
         prefill_device_ms = 0.0
+        prefill_step_wall_ms: list[float] = []
         decode_wall_ms: list[float] = []
         decode_device_ms: list[float] = []
         used_blocks_peak = self.cache.allocator.num_used_blocks
@@ -472,6 +536,7 @@ class SyntheticDecodeRunner:
                     if batch.phase == "prefill":
                         prefill_wall_ms += wall_ms
                         prefill_device_ms += device_ms
+                        prefill_step_wall_ms.append(wall_ms)
                     elif batch.phase == "decode":
                         decode_wall_ms.append(wall_ms)
                         decode_device_ms.append(device_ms)
@@ -506,6 +571,11 @@ class SyntheticDecodeRunner:
             generated_tokens=generated_tokens,
             logits=tuple(self._step_logits),
             prefill_wall_ms=prefill_wall_ms,
+            prefill_step_wall_ms=tuple(prefill_step_wall_ms),
+            prefill_mode=self.config.prefill_mode,
+            prefill_batch_count=len(prefill_step_wall_ms),
+            prefill_tokens=sum(self.prompt_lengths),
+            prefill_padding_tokens=0,
             decode_step_wall_ms=tuple(decode_wall_ms),
             ttft_wall_ms=prefill_wall_ms + decode_wall_ms[0],
             tpot_wall_ms=tpot_wall_ms,

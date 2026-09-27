@@ -34,6 +34,39 @@ def test_synthetic_decoder_reference_and_sdpa_match(num_kv_heads):
     assert sdpa.used_blocks_peak > 0
 
 
+@pytest.mark.parametrize("num_kv_heads", [4, 2, 1])
+def test_synthetic_token_and_batched_prefill_match(num_kv_heads):
+    common = dict(
+        vocab_size=32,
+        num_heads=4,
+        num_kv_heads=num_kv_heads,
+        head_dim=8,
+        block_size=4,
+        dtype=torch.float32,
+        device="cpu",
+        seed=19,
+        backend="paged_sdpa",
+        max_num_seqs=2,
+        max_num_batched_tokens=5,
+    )
+    token = SyntheticDecodeRunner(
+        SyntheticDecoderConfig(**common, prefill_mode="token"),
+        [[1, 2, 3, 4, 5], [7, 8, 9]],
+        max_new_tokens=3,
+    ).run()
+    batched = SyntheticDecodeRunner(
+        SyntheticDecoderConfig(**common, prefill_mode="batched"),
+        [[1, 2, 3, 4, 5], [7, 8, 9]],
+        max_new_tokens=3,
+    ).run()
+
+    assert batched.generated_tokens == token.generated_tokens
+    assert batched.prefill_mode == "batched"
+    assert batched.prefill_batch_count == token.prefill_batch_count
+    for expected, actual in zip(token.logits, batched.logits):
+        assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)
+
+
 def test_synthetic_decoder_releases_all_blocks_after_generation():
     config = SyntheticDecoderConfig(
         vocab_size=16,

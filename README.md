@@ -23,9 +23,12 @@ synthetic decoder 保留固定权重闭环；可选 Transformers adapter 进一�
 - 模型无关的单层 synthetic decoder：embedding、Q/K/V 投影、paged KV append、decode attention、输出投影和 greedy token 生成。
 - 可选 `Transformers/Llama` adapter：tiny random `LlamaConfig`、本地 checkpoint、
   多层 RMSNorm/RoPE/GQA、paged KV cache 和真实 decoder layer 手动执行。
+- HF Llama 与 synthetic runtime 都支持 batched Prefill：按 scheduler token budget
+  合并 QKV/cache 写入；HF 路径使用 ragged causal SDPA，保留 `token` 基线用于 A/B。
 - 使用 Transformers eager full-sequence path 做 logits/token correctness oracle，并输出
-  prefill、decode P50/P95、TTFT/TPOT、KV memory 和 backend/kernel 配置。
-- runtime 可选 `prefill_fn`/`decode_fn` hook，保留原有无模型 `step()` 接口。
+  prefill P50/P95、decode P50/P95、TTFT/TPOT、KV memory 和 backend/kernel 配置。
+- runtime 支持 `prefill_fn`、`prefill_batch_fn` 和 `decode_fn` hook，保留原有无模型
+  `step()` 接口；批量 hook 未提供时自动回退到逐请求 callback。
 - benchmark 输出各路径的误差、P50/P95、环境信息和形状级相对性能。
 - attention microbenchmark 和端到端 decode benchmark 分开记录，避免混淆比较对象。
 - A100 参数 sweep、Nsight Compute profiling 脚本及面试记录材料。
@@ -88,8 +91,21 @@ python3 -m inferkernellab.hf_benchmark \
   --model-source random --device cuda --dtype bfloat16 \
   --backend paged_sdpa --batch-size 2 --prompt-length 128 \
   --max-new-tokens 8 --warmup 10 --iterations 50 \
+  --prefill-mode batched \
   --output docs/benchmark_results/llama_paged.json
 ```
+
+默认 `--prefill-mode batched`；使用 `--prefill-mode token` 可复现原逐 token
+Prefill 基线。两种模式共享 `--max-num-batched-tokens`，并在结果中记录
+`prefill_p50_ms`、`prefill_p95_ms`、`prefill_batch_count`、有效 token 数和 padding token 数。
+运行固定配置的 HF Llama A/B：
+
+```bash
+IMAGE=inferkernellab:cuda scripts/run_prefill_ab.sh
+```
+
+批量 Prefill 的数据流、ragged causal mask、paged slot 写入和正确性口径见
+[`docs/batched_prefill_design.md`](docs/batched_prefill_design.md)。
 
 `--model-source path --model-path PATH` 只读取本地 Transformers checkpoint，使用
 `local_files_only=True`，不会隐式联网。设计说明见
@@ -120,7 +136,7 @@ src/inferkernellab/
   attention.py   PyTorch reference、dense SDPA、paged SDPA
   triton_ops.py  Triton KV append、paged decode attention 与 grouped GQA/MQA kernel
   decode.py      单层 synthetic decoder 与端到端 decode runner
-  hf_benchmark.py 可选 Transformers/Llama 多层 paged decode adapter
+  hf_benchmark.py 可选 Transformers/Llama 多层 paged prefill/decode adapter
   scheduler.py   prefill/decode token-budget 调度示例
   runtime.py     请求、KV block 生命周期和模型执行 hook
   benchmark.py   正确性、延迟和环境信息采集
@@ -154,6 +170,8 @@ slot = physical_block * block_size + p % block_size
   `tensorcore_short_context`、`scalar_grouped` 和 `mha_fallback`，避免把不同映射混成一个
   性能数字。
 - 端到端 benchmark 同时记录 wall-clock 和 CUDA Event 设备时间；`TTFT` 定义为全部 prefill step 加第一个 decode step，`TPOT` 显式记录平均 decode step 时间，同时报告 decode step P50/P95。
+- Prefill benchmark 同时记录总耗时、每个 scheduler batch 的 P50/P95、批次数、有效 token
+  数和 padding token 数；batched 路径的 attention 时间包含 paged KV gather 与 causal SDPA。
 - `tokens_per_sec` 是整个 batch 生成 token 数除以 decode 阶段耗时，不等同线上服务吞吐。
 
 当前端到端结果保存在 `docs/benchmark_results/a100_synthetic_decode.jsonl`。A100 上 108 条记录全部通过 dtype-aware logits `allclose`；但 greedy token 是离散 argmax，接近相等的 logits 可能在不同数值路径下产生不同 token，因此报告同时记录 `token_match_rate`，不能只看 token 一致率判断浮点实现是否正确。
@@ -182,5 +200,7 @@ docker run --rm --gpus all --ipc=host --shm-size=16g \
 - `docs/benchmark_results/a100_synthetic_decode_triton_append.jsonl`：一个选定形状的 Triton append 组合结果。
 - `docs/benchmark_results/grouped_gqa_tensorcore_20260927.md`：最新 grouped path、metadata 优化与 A100 A/B 摘要。
 - `docs/benchmark_results/grouped_gqa_tensorcore_20260927.jsonl`：对应的 24 条 clean provenance 原始记录。
+- `docs/benchmark_results/prefill_ab_afd68e9.md`：clean commit 上的 batched/token Prefill A/B 摘要。
+- `docs/benchmark_results/prefill_ab_afd68e9.json`：小体积结构化结果和 correctness/provenance 摘要。
 
 简历只引用报告中可复现的形状级结果，并明确比较对象、GPU、精度和测量口径。不要把 reference 对比结果概括成普遍的推理加速比。
