@@ -17,7 +17,9 @@ synthetic decoder 保留固定权重闭环；可选 Transformers adapter 进一�
 - 可选 Triton paged decode attention 和 KV append kernel。
 - 可选 grouped GQA/MQA Triton paged attention：以 `(request, kv_head, query_group)`
   为 program 映射，让同一 KV head 的 query-head group 共享 K/V tile；旧
-  `triton_paged` backend 保持不变。
+  `triton_paged` backend 保持不变。对短 context 的 FP16/BF16 shape 额外使用
+  Tensor Core `tl.dot` 路径，长 context 使用 scalar grouped fallback，MHA 直接 fallback
+  到旧 kernel。
 - 模型无关的单层 synthetic decoder：embedding、Q/K/V 投影、paged KV append、decode attention、输出投影和 greedy token 生成。
 - 可选 `Transformers/Llama` adapter：tiny random `LlamaConfig`、本地 checkpoint、
   多层 RMSNorm/RoPE/GQA、paged KV cache 和真实 decoder layer 手动执行。
@@ -148,6 +150,9 @@ slot = physical_block * block_size + p % block_size
 - `estimated_kv_read_gbps` 是按 K/V 理论读取字节数计算的估算值，不是硬件计数器。DRAM 吞吐只能来自 Nsight Compute 等 profiler。
 - CUDA Event 测量的是 GPU 时间线上的设备执行区间，不等同于含 Python 调度、排队和网络开销的线上请求延迟。
 - 输出 `kernel_config` 记录 Triton autotuner 选择的 `block_n`、`num_warps` 和 `num_stages`。
+- grouped benchmark 额外记录 `kernel_config.implementation`，区分
+  `tensorcore_short_context`、`scalar_grouped` 和 `mha_fallback`，避免把不同映射混成一个
+  性能数字。
 - 端到端 benchmark 同时记录 wall-clock 和 CUDA Event 设备时间；`TTFT` 定义为全部 prefill step 加第一个 decode step，`TPOT` 显式记录平均 decode step 时间，同时报告 decode step P50/P95。
 - `tokens_per_sec` 是整个 batch 生成 token 数除以 decode 阶段耗时，不等同线上服务吞吐。
 

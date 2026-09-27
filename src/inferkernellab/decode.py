@@ -254,6 +254,11 @@ class SyntheticDecodeRunner:
             value.reshape(-1, self.config.num_kv_heads, self.config.head_dim),
         )
 
+    def _project_query(self, token_ids: torch.Tensor) -> torch.Tensor:
+        hidden = F.embedding(token_ids.to(dtype=torch.long), self.weights.embedding)
+        query = F.linear(hidden, self.weights.q_proj)
+        return query.reshape(-1, self.config.num_heads, self.config.head_dim)
+
     def _project_kv(self, token_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         hidden = F.embedding(token_ids.to(dtype=torch.long), self.weights.embedding)
         key = F.linear(hidden, self.weights.k_proj)
@@ -368,13 +373,13 @@ class SyntheticDecodeRunner:
         else:
             current_tensor = torch.tensor(current_ids, dtype=torch.long, device=self.device)
 
-        query, _, _ = self._project(current_tensor)
+        query = self._project_query(current_tensor)
         context_lengths = [request.prompt_tokens + request.generated_tokens for request in requests]
         attended = self._attention(query, requests, context_lengths)
         hidden = F.linear(attended.reshape(attended.shape[0], -1), self.weights.out_proj)
         logits = F.linear(hidden, self.weights.lm_head)
         next_tokens = logits.argmax(dim=-1)
-        _, next_key, next_value = self._project(next_tokens)
+        next_key, next_value = self._project_kv(next_tokens)
         self._append_batch(requests, next_key, next_value)
 
         self._step_logits.append(logits.detach().float().cpu())

@@ -22,7 +22,9 @@ from .triton_ops import (
     paged_decode_attention_triton,
     paged_decode_attention_triton_grouped,
     paged_decode_autotune_config,
+    paged_decode_grouped_dot_autotune_config,
     paged_decode_grouped_autotune_config,
+    paged_decode_grouped_path,
     triton_available,
 )
 
@@ -633,11 +635,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     kernel_config = None
     if args.backend == "triton_paged_grouped":
         reuse_factor = int(model.config.num_attention_heads) // int(model.config.num_key_value_heads)
+        query_group_size = min(8, reuse_factor)
+        grouped_path = paged_decode_grouped_path(
+            dtype=dtype,
+            head_dim=int(model.config.head_dim),
+            table_width=math.ceil((args.prompt_length + args.max_new_tokens) / args.block_size),
+            heads_per_kv=reuse_factor,
+            query_group_size=query_group_size,
+        )
         kernel_config = {
-            "kernel_variant": "grouped",
-            "query_group_size": min(8, reuse_factor),
+            "kernel_variant": "mha_fallback" if grouped_path == "mha_fallback" else "grouped",
+            "implementation": grouped_path,
+            "query_group_size": query_group_size,
             "kv_reuse_factor": reuse_factor,
-            **(paged_decode_grouped_autotune_config() or {}),
+            **(
+                paged_decode_grouped_dot_autotune_config()
+                if grouped_path == "tensorcore_short_context"
+                else paged_decode_grouped_autotune_config()
+                or {}
+            ),
         }
     elif args.backend == "triton_paged":
         kernel_config = paged_decode_autotune_config()

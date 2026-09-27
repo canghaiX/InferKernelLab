@@ -16,6 +16,23 @@
 tile。`query_group_size` 默认是 8；当 `num_heads == num_kv_heads` 时 wrapper 退化到旧
 kernel，避免 MHA 引入额外寄存器开销。
 
+## Shape-Aware Dispatch
+
+grouped backend 根据静态 launch shape 选择实现路径，并把选择写入 benchmark 的
+`kernel_config.implementation`：
+
+- `tensorcore_short_context`：FP16/BF16、`head_dim >= 16`、每个 KV head 至少 4 个
+  query heads、block table 不超过 16 个 logical blocks。每个 program 使用 16 行 query
+  padding 调用 `tl.dot`，将 QK^T 映射到 A100 Tensor Core；无效尾部 query 行通过 mask
+  处理。
+- `scalar_grouped`：长 context、较小 query group 或不满足 dtype/head-dim 条件时使用原有
+  online-softmax grouped kernel，避免矩阵 padding 和寄存器压力扩大长序列开销。
+- `mha_fallback`：MHA 直接复用旧 `triton_paged`，不为没有 KV reuse 的 shape 引入 grouped
+  额外开销。
+
+这是保守的静态启发式，不是基于理论 KV read bytes 的性能承诺；最终结论仍需在目标 GPU、
+dtype、batch 和 context 上用 CUDA Event 复测。
+
 当前实现支持 group size `1/2/4/8`、head dimension 不超过 128、ragged context、非连续
 physical block table、multi-layer cache，以及 FP16/BF16。尾部不足一个完整 group 的 query
 heads 通过 mask 处理。
@@ -46,6 +63,8 @@ python3 scripts/run_decode_sweep.py \
 结果额外记录：
 
 - `kernel_variant=grouped`；
+- `kernel_config.implementation`（`tensorcore_short_context`、`scalar_grouped` 或
+  `mha_fallback`）；
 - `query_group_size`；
 - `kv_reuse_factor`；
 - grouped Triton autotune 的 block/warp/stage 配置。

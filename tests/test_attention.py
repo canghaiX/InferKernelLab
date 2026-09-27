@@ -13,8 +13,32 @@ from inferkernellab.append import append_kv_triton, triton_append_available
 from inferkernellab.triton_ops import (
     paged_decode_attention_triton,
     paged_decode_attention_triton_grouped,
+    paged_decode_grouped_path,
     triton_available,
 )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "table_width", "heads_per_kv", "expected"),
+    [
+        (torch.float16, 8, 4, "tensorcore_short_context"),
+        (torch.bfloat16, 16, 32, "tensorcore_short_context"),
+        (torch.float16, 17, 32, "scalar_grouped"),
+        (torch.float32, 8, 32, "scalar_grouped"),
+        (torch.float16, 8, 1, "mha_fallback"),
+    ],
+)
+def test_grouped_kernel_path_selection(dtype, table_width, heads_per_kv, expected):
+    assert (
+        paged_decode_grouped_path(
+            dtype=dtype,
+            head_dim=64,
+            table_width=table_width,
+            heads_per_kv=heads_per_kv,
+            query_group_size=8,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("num_heads,num_kv_heads", [(4, 4), (4, 2), (4, 1)])

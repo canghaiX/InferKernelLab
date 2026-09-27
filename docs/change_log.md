@@ -60,3 +60,17 @@
 2. 说明为什么 attention-only Triton 可能胜过 paged gather + SDPA，但端到端 synthetic decoder 仍输给 paged SDPA：PyTorch SDPA backend 可能更成熟，且端到端包含投影、launch 和 Python/runtime 开销。
 3. 区分 logits `allclose` 与 greedy token 一致率：argmax 对小 margin 不连续，token mismatch 不必然表示数值实现错误。
 4. 强调下一步不是继续堆 synthetic 层数，而是解决 profiler counter 权限或接入真实小模型做 TTFT/TPOT 复测。
+
+## 2026-09-27：Grouped Tensor Core 路径与 synthetic decode 投影优化
+
+### 改动点
+
+- **shape-aware grouped dispatch**：新增短 context FP16/BF16 Tensor Core 路径，以 16 行 query padding 调用 `tl.dot`；长 context 保持 scalar grouped kernel，MHA 直接复用旧 `triton_paged`。
+- **benchmark 可审计性**：synthetic decode 与 HF Llama benchmark 记录实际 `kernel_config.implementation` 和对应 autotune 配置，不再只记录抽象的 grouped backend 名称。
+- **去除重复投影**：synthetic decoder decode step 原先分别计算完整 QKV、再计算完整 QKV，实际只使用当前 token 的 Q 和下一 token 的 K/V；现在拆成 `_project_query` 与 `_project_kv`，删除未使用的矩阵乘。
+
+### 验证与局限
+
+- 全量 pytest：`56 passed`；新增 grouped path selection 单测，CUDA grouped correctness 覆盖 FP16/BF16、GQA/MQA、多 block context。
+- A100 kernel/端到端复测显示短 context Tensor Core 路径 correctness 通过，grouped kernel-only 有改善；端到端收益受模型投影、append 和 runtime 调度摊薄，因此仍保持 grouped backend 显式 opt-in，不宣称普遍 10% 加速。
+- 具体新一轮 clean-commit benchmark 结果写入 `docs/benchmark_results/grouped_gqa_tensorcore_20260927.*`；旧 `grouped_gqa_smoke.*` 结果保留不覆盖。

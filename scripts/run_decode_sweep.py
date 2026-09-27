@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import platform
 import subprocess
 import sys
@@ -14,7 +15,9 @@ import torch
 from inferkernellab.decode import DecodeRunResult, SyntheticDecodeRunner, SyntheticDecoderConfig
 from inferkernellab.triton_ops import (
     paged_decode_autotune_config,
+    paged_decode_grouped_dot_autotune_config,
     paged_decode_grouped_autotune_config,
+    paged_decode_grouped_path,
 )
 
 
@@ -217,6 +220,31 @@ def _aggregate(repeats: list[dict]) -> dict:
     return {field: _median([float(repeat[field]) for repeat in repeats]) for field in fields}
 
 
+def _grouped_kernel_config(args: argparse.Namespace, dtype: torch.dtype) -> dict:
+    heads_per_kv = args.num_heads // args.num_kv_heads
+    query_group_size = min(8, heads_per_kv)
+    table_width = math.ceil((args.context_len + args.max_new_tokens) / args.block_size)
+    implementation = paged_decode_grouped_path(
+        dtype=dtype,
+        head_dim=args.head_dim,
+        table_width=table_width,
+        heads_per_kv=heads_per_kv,
+        query_group_size=query_group_size,
+    )
+    autotune = (
+        paged_decode_grouped_dot_autotune_config()
+        if implementation == "tensorcore_short_context"
+        else paged_decode_grouped_autotune_config()
+    )
+    return {
+        "kernel_variant": "mha_fallback" if implementation == "mha_fallback" else "grouped",
+        "implementation": implementation,
+        "query_group_size": query_group_size,
+        "kv_reuse_factor": heads_per_kv,
+        **(autotune or {}),
+    }
+
+
 def _run_case(args: argparse.Namespace, backend: str, append_backend: str) -> dict:
     device = torch.device(args.device)
     dtype = _dtype(args.dtype)
@@ -288,12 +316,7 @@ def _run_case(args: argparse.Namespace, backend: str, append_backend: str) -> di
         "attention_backend": backend,
         "append_backend": append_backend,
         "kernel_config": (
-            {
-                "kernel_variant": "grouped",
-                "query_group_size": min(8, args.num_heads // args.num_kv_heads),
-                "kv_reuse_factor": args.num_heads // args.num_kv_heads,
-                **(paged_decode_grouped_autotune_config() or {}),
-            }
+            _grouped_kernel_config(args, dtype)
             if backend == "triton_paged_grouped"
             else paged_decode_autotune_config()
             if backend == "triton_paged"

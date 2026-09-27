@@ -40,6 +40,41 @@ def paged_decode_grouped_autotune_config() -> dict | None:
     }
 
 
+def paged_decode_grouped_dot_autotune_config() -> dict | None:
+    if triton is None:
+        return None
+    best_config = getattr(_paged_decode_grouped_dot_kernel, "best_config", None)
+    if best_config is None:
+        return None
+    return {
+        "block_n": best_config.kwargs["block_n"],
+        "num_warps": best_config.num_warps,
+        "num_stages": best_config.num_stages,
+    }
+
+
+def paged_decode_grouped_path(
+    *,
+    dtype: torch.dtype,
+    head_dim: int,
+    table_width: int,
+    heads_per_kv: int,
+    query_group_size: int,
+) -> str:
+    """Return the grouped implementation selected for a static launch shape."""
+    effective_group_size = min(query_group_size, heads_per_kv)
+    if heads_per_kv == 1:
+        return "mha_fallback"
+    if (
+        dtype in (torch.float16, torch.bfloat16)
+        and head_dim >= 16
+        and effective_group_size >= 4
+        and table_width <= 16
+    ):
+        return "tensorcore_short_context"
+    return "scalar_grouped"
+
+
 if triton is not None:
 
     @triton.autotune(
@@ -248,6 +283,124 @@ if triton is not None:
         )
 
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"block_n": 32}, num_warps=4, num_stages=2),
+            triton.Config({"block_n": 64}, num_warps=4, num_stages=2),
+            triton.Config({"block_n": 128}, num_warps=8, num_stages=2),
+        ],
+        key=["head_dim", "table_width"],
+    )
+    @triton.jit
+    def _paged_decode_grouped_dot_kernel(
+        q_ptr,
+        k_ptr,
+        v_ptr,
+        table_ptr,
+        len_ptr,
+        out_ptr,
+        stride_q_b,
+        stride_q_h,
+        stride_k_b,
+        stride_k_t,
+        stride_k_h,
+        stride_v_b,
+        stride_v_t,
+        stride_v_h,
+        stride_table_b,
+        stride_out_b,
+        stride_out_h,
+        table_width,
+        num_physical_blocks,
+        num_heads,
+        num_kv_heads,
+        heads_per_kv,
+        query_group_size,
+        head_dim,
+        block_size: tl.constexpr,
+        block_n: tl.constexpr,
+        block_d: tl.constexpr,
+        block_m: tl.constexpr,
+        scale,
+    ):
+        batch_id = tl.program_id(0)
+        kv_head = tl.program_id(1)
+        query_group = tl.program_id(2)
+        offs_h = tl.arange(0, block_m)
+        offs_d = tl.arange(0, block_d)
+        head_start = kv_head * heads_per_kv + query_group * query_group_size
+        head_ids = head_start + offs_h
+        mask_h = (offs_h < query_group_size) & (head_ids < (kv_head + 1) * heads_per_kv)
+        mask_d = offs_d < head_dim
+        q = tl.load(
+            q_ptr
+            + batch_id * stride_q_b
+            + head_ids[:, None] * stride_q_h
+            + offs_d[None, :],
+            mask=mask_h[:, None] & mask_d[None, :],
+            other=0.0,
+        )
+        context_len = tl.load(len_ptr + batch_id)
+        max_score = tl.full((block_m,), -float("inf"), dtype=tl.float32)
+        denom = tl.zeros((block_m,), dtype=tl.float32)
+        acc = tl.zeros((block_m, block_d), dtype=tl.float32)
+        offs_n = tl.arange(0, block_n)
+        for start_n in tl.range(0, context_len, block_n):
+            positions = start_n + offs_n
+            logical_blocks = positions // block_size
+            active = (positions < context_len) & (logical_blocks < table_width)
+            offsets = positions - logical_blocks * block_size
+            physical_blocks = tl.load(
+                table_ptr + batch_id * stride_table_b + logical_blocks,
+                mask=active,
+                other=0,
+            )
+            active = active & (physical_blocks >= 0) & (physical_blocks < num_physical_blocks)
+            k = tl.load(
+                k_ptr
+                + physical_blocks[:, None] * stride_k_b
+                + offsets[:, None] * stride_k_t
+                + kv_head * stride_k_h
+                + offs_d[None, :],
+                mask=active[:, None] & mask_d[None, :],
+                other=0.0,
+            )
+            v = tl.load(
+                v_ptr
+                + physical_blocks[:, None] * stride_v_b
+                + offsets[:, None] * stride_v_t
+                + kv_head * stride_v_h
+                + offs_d[None, :],
+                mask=active[:, None] & mask_d[None, :],
+                other=0.0,
+            )
+            scores = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * scale
+            score_mask = mask_h[:, None] & active[None, :]
+            scores = tl.where(score_mask, scores, -float("inf"))
+            tile_max = tl.max(scores, axis=1)
+            new_max = tl.where(mask_h, tl.maximum(max_score, tile_max), 0.0)
+            alpha = tl.where(mask_h, tl.exp(max_score - new_max), 0.0)
+            probabilities = tl.where(
+                score_mask,
+                tl.exp(scores - new_max[:, None]),
+                0.0,
+            )
+            acc = acc * alpha[:, None] + tl.sum(
+                probabilities[:, :, None] * v[None, :, :], axis=1
+            )
+            denom = denom * alpha + tl.sum(probabilities, axis=1)
+            max_score = new_max
+        out = acc / denom[:, None]
+        tl.store(
+            out_ptr
+            + batch_id * stride_out_b
+            + head_ids[:, None] * stride_out_h
+            + offs_d[None, :],
+            out,
+            mask=mask_h[:, None] & mask_d[None, :],
+        )
+
+
 def paged_decode_attention_triton(
     query,
     cache,
@@ -404,7 +557,14 @@ def paged_decode_attention_triton_grouped(
     block_d = triton.next_power_of_2(layout.head_dim)
     block_h = effective_group_size
     grid = (query.shape[0], layout.num_kv_heads, groups_per_kv)
-    _paged_decode_grouped_kernel[grid](
+    use_dot_path = paged_decode_grouped_path(
+        dtype=query.dtype,
+        head_dim=layout.head_dim,
+        table_width=block_tables.shape[1],
+        heads_per_kv=heads_per_kv,
+        query_group_size=query_group_size,
+    ) == "tensorcore_short_context"
+    common_args = (
         query,
         k_cache,
         v_cache,
@@ -429,9 +589,22 @@ def paged_decode_attention_triton_grouped(
         heads_per_kv,
         effective_group_size,
         layout.head_dim,
-        block_size=layout.block_size,
-        block_d=block_d,
-        block_h=block_h,
-        scale=scale if scale is not None else layout.head_dim ** -0.5,
     )
+    common_kwargs = {
+        "block_size": layout.block_size,
+        "block_d": block_d,
+        "scale": scale if scale is not None else layout.head_dim ** -0.5,
+    }
+    if use_dot_path:
+        _paged_decode_grouped_dot_kernel[grid](
+            *common_args,
+            block_m=16,
+            **common_kwargs,
+        )
+    else:
+        _paged_decode_grouped_kernel[grid](
+            *common_args,
+            block_h=block_h,
+            **common_kwargs,
+        )
     return output
