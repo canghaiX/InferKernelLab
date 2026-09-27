@@ -158,7 +158,11 @@ slot = physical_block * block_size + p % block_size
 
 当前端到端结果保存在 `docs/benchmark_results/a100_synthetic_decode.jsonl`。A100 上 108 条记录全部通过 dtype-aware logits `allclose`；但 greedy token 是离散 argmax，接近相等的 logits 可能在不同数值路径下产生不同 token，因此报告同时记录 `token_match_rate`，不能只看 token 一致率判断浮点实现是否正确。
 
-当前代表性 synthetic decoder sweep 的结论是：在本项目的单层模型无关闭环中，Triton direct-paged attention 的 decode step P50 中位数约为 paged SDPA 的 `0.841x`（即当前约慢 18.9%），没有胜过成熟的 PyTorch SDPA backend；这不否定它在 attention-only benchmark 中避免显式 gather 的价值。性能数字只适用于报告中的 A100、dtype、batch 和 context 配置。
+历史 108 条 sweep 的结论是：在本项目的单层模型闭环中，Triton direct-paged attention 没有稳定胜过成熟的 PyTorch SDPA backend。2026-09-27 的最新 24 条 clean-commit 复测见
+`docs/benchmark_results/grouped_gqa_tensorcore_20260927.md`：metadata buffer 复用后，
+Triton decode-step P50 中位数相对前一 clean commit 下降约 12.1%，但 grouped kernel 相对
+旧 `triton_paged` 仍没有稳定收益。性能数字只适用于报告中的 A100、dtype、batch 和
+context 配置。
 
 当前容器中的 `ncu` 可以启动，但驱动报告 `ERR_NVGPUCTRPERM`，说明 GPU performance counter 权限由宿主驱动策略限制。脚本不会修改宿主机权限；启用该权限后可运行：
 
@@ -176,5 +180,7 @@ docker run --rm --gpus all --ipc=host --shm-size=16g \
 - `docs/benchmark_report.md`：实际测量配置、结果、限制和复现命令。
 - `docs/benchmark_results/a100_synthetic_decode.jsonl`：单层 synthetic decoder 的原始端到端结果。
 - `docs/benchmark_results/a100_synthetic_decode_triton_append.jsonl`：一个选定形状的 Triton append 组合结果。
+- `docs/benchmark_results/grouped_gqa_tensorcore_20260927.md`：最新 grouped path、metadata 优化与 A100 A/B 摘要。
+- `docs/benchmark_results/grouped_gqa_tensorcore_20260927.jsonl`：对应的 24 条 clean provenance 原始记录。
 
 简历只引用报告中可复现的形状级结果，并明确比较对象、GPU、精度和测量口径。不要把 reference 对比结果概括成普遍的推理加速比。

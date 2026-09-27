@@ -76,3 +76,10 @@ python3 scripts/run_decode_sweep.py \
 截至 2026-09-26 的 A100 smoke 中，grouped kernel 已通过 FP16/BF16 correctness，但在
 当前 synthetic shape 上没有稳定优于旧 Triton backend，因此保持显式 opt-in。具体数据见
 `docs/benchmark_results/grouped_gqa_smoke.md`。
+
+2026-09-27 的 clean commit `5f7fc4f` 复测了 24 个 FP16 shape，全部通过 logits
+correctness 和 greedy token match。metadata buffer 复用让整个 Triton decode runtime 相对
+前一 clean commit 的 decode P50 中位数下降约 12%；但单独比较 grouped 与旧
+`triton_paged`，Tensor Core 短 context 路径在大 batch 的一个 GQA shape 上仅约快 0.8%，
+其余 shape 持平或变慢。因此 grouped 仍保持显式 opt-in，不能宣称稳定的 kernel 加速。
+详细结果见 `docs/benchmark_results/grouped_gqa_tensorcore_20260927.md` 和对应 JSONL。

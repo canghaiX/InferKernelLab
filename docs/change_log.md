@@ -71,6 +71,9 @@
 
 ### 验证与局限
 
-- 全量 pytest：`56 passed`；新增 grouped path selection 单测，CUDA grouped correctness 覆盖 FP16/BF16、GQA/MQA、多 block context。
-- A100 kernel/端到端复测显示短 context Tensor Core 路径 correctness 通过，grouped kernel-only 有改善；端到端收益受模型投影、append 和 runtime 调度摊薄，因此仍保持 grouped backend 显式 opt-in，不宣称普遍 10% 加速。
-- 具体新一轮 clean-commit benchmark 结果写入 `docs/benchmark_results/grouped_gqa_tensorcore_20260927.*`；旧 `grouped_gqa_smoke.*` 结果保留不覆盖。
+- 全量 pytest：`61 passed`；新增 grouped path selection 单测，CUDA grouped correctness 覆盖 FP16/BF16、GQA/MQA、多 block context。
+- A100 clean-commit synthetic sweep 共 24 条记录，24/24 通过 logits correctness，greedy token match 为 100%。
+- metadata buffer 复用相对前一 clean commit `0b1a087`，Triton decode-step P50 中位数下降约 `12.1%`，grouped 路径下降约 `11.6%`；这是 runtime metadata 优化，不应误写成 grouped kernel 加速。
+- grouped 相对旧 `triton_paged` 的最新 8 个 shape 中，仅 `B=16,C=128,KV=8` 约快 `0.8%`，其余 shape 持平或变慢；因此 grouped 继续显式 opt-in，不宣称稳定 10% 加速。
+- 多层 tiny Llama HF 对照中，old/grouped logits 最大误差均为 `7.93e-4`、token match `100%`；当前配置 decode P50 分别为 `3.653 ms` 与 `3.666 ms`，说明端到端仍近乎持平。
+- 具体 clean benchmark 结果写入 `docs/benchmark_results/grouped_gqa_tensorcore_20260927.*`；旧 `grouped_gqa_smoke.*` 结果保留不覆盖。
