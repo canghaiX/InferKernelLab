@@ -204,6 +204,24 @@ class SyntheticDecodeRunner:
         self._generated_token_tensors: dict[int, list[torch.Tensor]] = {
             request.request_id: [] for request in self.requests
         }
+        self._metadata_width = max(
+            1,
+            max(
+                math.ceil((length + max_new_tokens) / config.block_size)
+                for length in self.prompt_lengths
+            ),
+        )
+        self._block_table_storage = torch.zeros(
+            (len(self.requests), self._metadata_width),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._block_table_lengths = [0] * len(self.requests)
+        self._context_length_storage = torch.empty(
+            len(self.requests),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self._step_logits: list[torch.Tensor] = []
         self._has_run = False
 
@@ -277,13 +295,37 @@ class SyntheticDecodeRunner:
         key, value = self._project_kv(token_ids)
         self._append_to_cache(request, start_token, key, value)
 
-    def _block_tables(self, requests: Sequence[InferenceRequest]) -> torch.Tensor:
-        width = max(1, max(len(request.block_table) for request in requests))
-        tables = torch.zeros((len(requests), width), dtype=torch.int32, device=self.device)
-        for row, request in enumerate(requests):
-            table = torch.tensor(request.block_table, dtype=torch.int32, device=self.device)
-            tables[row, : table.numel()] = table
-        return tables
+    def _metadata_tensors(
+        self,
+        requests: Sequence[InferenceRequest],
+        context_lengths: Sequence[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        request_ids = tuple(request.request_id for request in requests)
+        if len(request_ids) != len(context_lengths):
+            raise ValueError("requests and context_lengths must have the same length")
+        for request in requests:
+            request_id = request.request_id
+            table_length = len(request.block_table)
+            if table_length > self._metadata_width:
+                raise RuntimeError("request block table exceeds preallocated metadata capacity")
+            cached_length = self._block_table_lengths[request_id]
+            if table_length > cached_length:
+                table = torch.as_tensor(
+                    request.block_table[cached_length:],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                self._block_table_storage[request_id, cached_length:table_length].copy_(table)
+                self._block_table_lengths[request_id] = table_length
+        if request_ids == tuple(range(len(requests))):
+            tables = self._block_table_storage[: len(requests)]
+            lengths = self._context_length_storage[: len(requests)]
+        else:
+            ids = torch.as_tensor(request_ids, dtype=torch.long, device=self.device)
+            tables = self._block_table_storage.index_select(0, ids)
+            lengths = self._context_length_storage.index_select(0, ids)
+        lengths.copy_(torch.as_tensor(context_lengths, dtype=torch.int32, device=self.device))
+        return tables, lengths
 
     def _attention(
         self,
@@ -300,8 +342,7 @@ class SyntheticDecodeRunner:
             raise RuntimeError(
                 f"{self.config.backend} requires a CUDA device and an installed Triton backend"
             )
-        table_tensor = self._block_tables(requests)
-        length_tensor = torch.tensor(context_lengths, dtype=torch.int32, device=self.device)
+        table_tensor, length_tensor = self._metadata_tensors(requests, context_lengths)
         if self.config.backend == "triton_paged_grouped":
             return paged_decode_attention_triton_grouped(
                 query,

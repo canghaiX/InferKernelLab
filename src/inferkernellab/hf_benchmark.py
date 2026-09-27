@@ -187,6 +187,24 @@ class LlamaPagedDecodeRunner:
             self.runtime.submit(request_id, len(prompt), max_new_tokens)
             for request_id, prompt in enumerate(self.prompts)
         ]
+        self._metadata_width = max(
+            1,
+            max(
+                math.ceil((length + max_new_tokens) / block_size)
+                for length in self.prompt_lengths
+            ),
+        )
+        self._block_table_storage = torch.zeros(
+            (len(self.requests), self._metadata_width),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._block_table_lengths = [0] * len(self.requests)
+        self._context_length_storage = torch.empty(
+            len(self.requests),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self._prompt_logits: dict[int, torch.Tensor] = {}
         self._next_logits: dict[int, torch.Tensor] = {}
         self._decode_logits: list[torch.Tensor] = []
@@ -195,13 +213,37 @@ class LlamaPagedDecodeRunner:
         }
         self._has_run = False
 
-    def _block_tables(self, requests: Sequence[InferenceRequest]) -> torch.Tensor:
-        width = max(len(request.block_table) for request in requests)
-        tables = torch.zeros((len(requests), width), dtype=torch.int32, device=self.device)
-        for row, request in enumerate(requests):
-            table = torch.tensor(request.block_table, dtype=torch.int32, device=self.device)
-            tables[row, : table.numel()] = table
-        return tables
+    def _metadata_tensors(
+        self,
+        requests: Sequence[InferenceRequest],
+        context_lengths: Sequence[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        request_ids = tuple(request.request_id for request in requests)
+        if len(request_ids) != len(context_lengths):
+            raise ValueError("requests and context_lengths must have the same length")
+        for request in requests:
+            request_id = request.request_id
+            table_length = len(request.block_table)
+            if table_length > self._metadata_width:
+                raise RuntimeError("request block table exceeds preallocated metadata capacity")
+            cached_length = self._block_table_lengths[request_id]
+            if table_length > cached_length:
+                table = torch.as_tensor(
+                    request.block_table[cached_length:],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                self._block_table_storage[request_id, cached_length:table_length].copy_(table)
+                self._block_table_lengths[request_id] = table_length
+        if request_ids == tuple(range(len(requests))):
+            tables = self._block_table_storage[: len(requests)]
+            lengths = self._context_length_storage[: len(requests)]
+        else:
+            ids = torch.as_tensor(request_ids, dtype=torch.long, device=self.device)
+            tables = self._block_table_storage.index_select(0, ids)
+            lengths = self._context_length_storage.index_select(0, ids)
+        lengths.copy_(torch.as_tensor(context_lengths, dtype=torch.int32, device=self.device))
+        return tables, lengths
 
     def _attention(
         self,
@@ -210,7 +252,7 @@ class LlamaPagedDecodeRunner:
         context_lengths: Sequence[int],
         layer: int,
     ) -> torch.Tensor:
-        tables = self._block_tables(requests)
+        tables, lengths = self._metadata_tensors(requests, context_lengths)
         if self.backend == "paged_reference":
             return paged_decode_attention(
                 query,
@@ -227,13 +269,12 @@ class LlamaPagedDecodeRunner:
                 context_lengths,
                 layer=layer,
             )
-        lengths = torch.tensor(context_lengths, dtype=torch.int32, device=self.device)
         if self.backend == "triton_paged_grouped":
             return paged_decode_attention_triton_grouped(
                 query,
                 self.cache,
                 tables,
-                torch.tensor(context_lengths, dtype=torch.int32, device=self.device),
+                lengths,
                 layer=layer,
                 validate_inputs=True,
             )
