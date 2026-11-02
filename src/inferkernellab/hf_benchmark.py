@@ -7,9 +7,10 @@ import platform
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import torch
 
@@ -26,8 +27,8 @@ from .triton_ops import (
     paged_decode_attention_triton,
     paged_decode_attention_triton_grouped,
     paged_decode_autotune_config,
-    paged_decode_grouped_dot_autotune_config,
     paged_decode_grouped_autotune_config,
+    paged_decode_grouped_dot_autotune_config,
     paged_decode_grouped_path,
     triton_available,
 )
@@ -106,6 +107,9 @@ class LlamaPagedRunResult:
     prefill_batch_count: int = 0
     prefill_tokens: int = 0
     prefill_padding_tokens: int = 0
+    token_logprobs: tuple[tuple[float, ...], ...] = ()
+    sampling_logprobs: tuple[tuple[float, ...], ...] = ()
+    finish_reasons: tuple[str, ...] = ()
 
     @property
     def decode_p50_ms(self) -> float:
@@ -138,6 +142,10 @@ class LlamaPagedDecodeRunner:
         append_backend: str = "torch",
         max_num_batched_tokens: int = 2048,
         prefill_mode: str = "batched",
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        seed: int = 2026,
+        eos_token_ids: Sequence[int] | None = None,
     ) -> None:
         if not prompts:
             raise ValueError("at least one prompt is required")
@@ -156,6 +164,13 @@ class LlamaPagedDecodeRunner:
             raise ValueError(f"unsupported append backend: {append_backend}")
         if prefill_mode not in {"batched", "token"}:
             raise ValueError("prefill_mode must be batched or token")
+        if (
+            not math.isfinite(temperature)
+            or temperature < 0
+            or not math.isfinite(top_p)
+            or not 0 < top_p <= 1
+        ):
+            raise ValueError("temperature must be non-negative and top_p must be in (0, 1]")
         self.model = model
         self.device = next(model.parameters()).device
         self.dtype = next(model.parameters()).dtype
@@ -174,6 +189,11 @@ class LlamaPagedDecodeRunner:
         self.append_backend = append_backend
         self.prefill_mode = prefill_mode
         self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.top_p = top_p
+        self.eos_token_ids = set(eos_token_ids or ())
+        if any(token < 0 or token >= int(model.config.vocab_size) for token in self.eos_token_ids):
+            raise ValueError("EOS token id is outside the configured vocabulary")
         self.prompt_lengths = tuple(len(prompt) for prompt in self.prompts)
         self.num_layers = int(model.config.num_hidden_layers)
         self.num_heads = int(model.config.num_attention_heads)
@@ -234,6 +254,18 @@ class LlamaPagedDecodeRunner:
         self._generated: dict[int, list[int]] = {
             request.request_id: [] for request in self.requests
         }
+        self._token_logprobs: dict[int, list[float]] = {
+            request.request_id: [] for request in self.requests
+        }
+        self._sampling_logprobs: dict[int, list[float]] = {
+            request.request_id: [] for request in self.requests
+        }
+        self._finish_reasons = {request.request_id: "length" for request in self.requests}
+        self._generators = {}
+        for request in self.requests:
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(seed + request.request_id)
+            self._generators[request.request_id] = generator
         self._has_run = False
 
     def _metadata_tensors(
@@ -518,14 +550,59 @@ class LlamaPagedDecodeRunner:
         used_logits = torch.stack(
             [self._next_logits[request.request_id] for request in requests], dim=0
         )
-        next_tokens = used_logits.argmax(dim=-1).to(device=self.device, dtype=torch.long)
+        sampled = None
+        if self.temperature == 0 and not self.eos_token_ids:
+            next_tokens = used_logits.argmax(dim=-1).to(device=self.device, dtype=torch.long)
+        else:
+            sampled = [
+                self._sample_token(used_logits[row], self._generators[request.request_id])
+                for row, request in enumerate(requests)
+            ]
+            next_tokens = torch.stack([item[0] for item in sampled]).to(
+                device=self.device, dtype=torch.long
+            )
         positions = [request.prompt_tokens + request.generated_tokens for request in requests]
         next_logits = self._forward_batch(next_tokens, requests, positions)
         self._decode_logits.append(used_logits.detach().float().cpu())
         for row, request in enumerate(requests):
             token = int(next_tokens[row].item())
             self._generated[request.request_id].append(token)
+            if sampled is not None:
+                self._token_logprobs[request.request_id].append(float(sampled[row][1].item()))
+                self._sampling_logprobs[request.request_id].append(float(sampled[row][2].item()))
+            if token in self.eos_token_ids:
+                self._finish_reasons[request.request_id] = "eos"
+                request.max_new_tokens = request.generated_tokens + 1
             self._next_logits[request.request_id] = next_logits[row].detach()
+
+    def _sample_token(
+        self,
+        logits: torch.Tensor,
+        generator: torch.Generator,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        values = logits.float()
+        if self.temperature > 0:
+            values = values / self.temperature
+        policy_logprobs = torch.log_softmax(values, dim=-1)
+        if self.top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(values, descending=True)
+            sorted_probs = torch.softmax(sorted_logits, dim=-1)
+            remove = sorted_probs.cumsum(dim=-1) - sorted_probs > self.top_p
+            sorted_logits = sorted_logits.masked_fill(remove, float("-inf"))
+            filtered = torch.full_like(values, float("-inf"))
+            values = filtered.scatter(-1, sorted_indices, sorted_logits)
+        log_probs = torch.log_softmax(values, dim=-1)
+        if self.temperature == 0:
+            token = values.argmax(dim=-1)
+        else:
+            token = torch.multinomial(
+                log_probs.exp(), num_samples=1, generator=generator
+            ).squeeze(-1)
+        return (
+            token,
+            policy_logprobs.gather(-1, token.view(1)).squeeze(0),
+            log_probs.gather(-1, token.view(1)).squeeze(0),
+        )
 
     def _timed_step(self) -> tuple[object, float]:
         started = time.perf_counter()
@@ -564,11 +641,10 @@ class LlamaPagedDecodeRunner:
         generated_tokens = tuple(
             tuple(self._generated[request.request_id]) for request in self.requests
         )
-        expected = len(self.requests) * self.max_new_tokens
-        if sum(len(tokens) for tokens in generated_tokens) != expected:
-            raise RuntimeError("decoder finished with an unexpected number of generated tokens")
-        if len(decode_ms) != self.max_new_tokens:
-            raise RuntimeError("decoder did not produce one batched step per generated token")
+        if any(not tokens or len(tokens) > self.max_new_tokens for tokens in generated_tokens):
+            raise RuntimeError("decoder finished with an invalid generated sequence length")
+        if len(decode_ms) > self.max_new_tokens:
+            raise RuntimeError("decoder produced more steps than the generation limit")
         element_size = torch.tensor([], dtype=self.dtype).element_size()
         peak_kv_memory = (
             used_blocks_peak
@@ -600,6 +676,15 @@ class LlamaPagedDecodeRunner:
             prefill_batch_count=len(prefill_step_ms),
             prefill_tokens=sum(self.prompt_lengths),
             prefill_padding_tokens=self._prefill_padding_tokens,
+            token_logprobs=tuple(
+                tuple(self._token_logprobs[request.request_id]) for request in self.requests
+            ),
+            sampling_logprobs=tuple(
+                tuple(self._sampling_logprobs[request.request_id]) for request in self.requests
+            ),
+            finish_reasons=tuple(
+                self._finish_reasons[request.request_id] for request in self.requests
+            ),
             decode_step_wall_ms=tuple(decode_ms),
             ttft_wall_ms=prefill_ms + decode_ms[0],
             tpot_wall_ms=sum(decode_ms) / len(decode_ms),
@@ -650,7 +735,7 @@ def _load_model(
         model = LlamaForCausalLM.from_pretrained(
             str(model_path),
             local_files_only=True,
-            torch_dtype=dtype,
+            dtype=dtype,
         )
         source = {"type": "path", "path": str(model_path), "download": False}
     model.config._attn_implementation = "eager"
