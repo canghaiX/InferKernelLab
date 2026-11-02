@@ -30,6 +30,9 @@ synthetic decoder 保留固定权重闭环；可选 Transformers adapter 进一�
 - 支持离线 Llama rollout：按 prompt 生成多个 seeded temperature/top-p completion，记录
   response token、未截断 policy logprob、实际 nucleus sampling logprob、toy reward、EOS
   结束原因及模型/tokenizer 指纹，供 MiniTrainBench GRPO 更新使用。
+- 支持显式 `--engine sglang` 的本地 Qwen3/GSM8K rollout：批量提交 token IDs 到固定版本
+  SGLang native `/generate`，保留 completion logprob、数值 exact-match reward、数据与
+  模型指纹；不会隐式下载模型。
 - runtime 支持 `prefill_fn`、`prefill_batch_fn` 和 `decode_fn` hook，保留原有无模型
   `step()` 接口；批量 hook 未提供时自动回退到逐请求 callback。
 - benchmark 输出各路径的误差、P50/P95、环境信息和形状级相对性能。
@@ -114,6 +117,24 @@ PYTHONPATH=src python3 -m inferkernellab.rollout \
 本地已有 Llama checkpoint 时改用 `--model-source path --model-path PATH`；权重和 tokenizer
 只從本地讀取。rollout schema、policy ratio 的 logprob 约定和 reward 局限见
 [`docs/rollout_design.md`](docs/rollout_design.md)。
+
+Qwen3 + SGLang GSM8K rollout 使用固定的 temperature `0.8`、top-p `1.0` 和 8 个
+completions/group：
+
+```bash
+MODEL_PATH=/data/models/Qwen/Qwen3-0.6B \
+PROMPTS=/path/to/gsm8k/train.jsonl \
+OUTPUT=/tmp/gsm8k-rollout.jsonl \
+SGLANG_BASE_URL=http://127.0.0.1:30000 \
+DATA_MANIFEST=/path/to/gsm8k/manifest.json \
+scripts/run_sglang_gsm8k_rollout.sh
+```
+
+当前 Qwen3 全量 BF16 logprob 预检尚未通过，未发布 GRPO 更新后的三 seed 收益结论。
+本地初始模型完整测试集 EM 为 677/1,319；实测边界见
+[`docs/gsm8k_validation.md`](docs/gsm8k_validation.md)。
+SGLang rollout 的请求、logprob 和 fingerprint 约定见
+[`docs/sglang_gsm8k_rollout_design.md`](docs/sglang_gsm8k_rollout_design.md)。
 
 运行固定配置的 HF Llama A/B：
 

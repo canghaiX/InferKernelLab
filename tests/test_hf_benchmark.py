@@ -5,7 +5,12 @@ import torch
 
 pytest.importorskip("transformers")
 
-from inferkernellab.hf_benchmark import LlamaPagedDecodeRunner, _correctness, _load_model, run
+from inferkernellab.hf_benchmark import (
+    LlamaPagedDecodeRunner,
+    _correctness,
+    _load_model,
+    run,
+)
 from inferkernellab.triton_ops import triton_available
 
 
@@ -108,6 +113,8 @@ def test_random_llama_batched_prefill_handles_ragged_prompts(tmp_path):
         max_num_batched_tokens=args.max_num_batched_tokens,
         prefill_mode="batched",
     )
+    batched.cache.k.fill_(float("nan"))
+    batched.cache.v.fill_(float("nan"))
     result = batched.run()
     correctness = _correctness(model, prompts, result, device)
 

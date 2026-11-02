@@ -1,0 +1,737 @@
+{
+  "schema_version": 1,
+  "task": "qwen3_sglang_gsm8k_grpo_validation",
+  "date": "2026-11-03",
+  "status": "partial_full_logprob_gate_failed",
+  "full_cycle_accepted": false,
+  "data_scope": {
+    "training_questions": 256,
+    "test_questions": 1319,
+    "metadata": {
+      "dataset": "openai/gsm8k",
+      "license": "MIT",
+      "source_urls": {
+        "train": "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl",
+        "test": "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
+      },
+      "source_sha256": {
+        "train": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465",
+        "test": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14"
+      },
+      "official_counts": {
+        "train": 7473,
+        "test": 1319
+      },
+      "prepared_counts": {
+        "train": 256,
+        "test": 1319
+      },
+      "train_sample_seed": 2026,
+      "train_indices_sha256": "f8e2a9729458edfdd952a5cb6c43ea8b4f8072252b24cda65e700c5bcf296664"
+    },
+    "manifest_sha256": "03a8a84ce5031499274a9051fb24a7ce1ca2bb52d1c4f3ff80f46ece33ac0eab"
+  },
+  "server_runtime": {
+    "image": "harbor.baai.ac.cn/plugin/sglang-plugin-fl:0.2.0-cuda-sglang0.5.18-ci",
+    "image_id": "sha256:5a9ac549c12104c2b8757b28785c92a8710076f0a71f77ca8e18e1dd264d06d5",
+    "sglang": "0.5.18",
+    "torch": "2.13.0+cu130",
+    "transformers": "5.12.1",
+    "cuda": "13.0"
+  },
+  "initial_full_test": {
+    "task": "gsm8k",
+    "model_path": "/data/models/Qwen/Qwen3-0.6B",
+    "model_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+    "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+    "data_sha256": "cbd53f6e036445b6a00e0aa96b354b4a265b37338d0583940a2f52e473cdc256",
+    "sglang_server": {
+      "version": "0.5.18",
+      "model_path": "/data/models/Qwen/Qwen3-0.6B",
+      "dtype": "auto",
+      "attention_backend": "fa3",
+      "sampling_backend": "pytorch",
+      "enable_fp32_lm_head": false,
+      "enable_deterministic_inference": true,
+      "rl_on_policy_target": "fsdp"
+    },
+    "provenance": {
+      "git_revision": "5b25478c513f92613f924324a4fbad61c6489f65",
+      "git_dirty": true
+    },
+    "max_new_tokens": 256,
+    "batch_size": 128,
+    "temperature": 0.0,
+    "prompt_format": "gsm8k_chat_no_thinking_v1",
+    "count": 1319,
+    "exact_match": 0.513267626990144,
+    "correct": 677,
+    "generated_tokens": 277413,
+    "throughput_samples_per_sec": 7.633291434602543,
+    "batch_latency_p50_ms": 15707.426853477955,
+    "batch_latency_p95_ms": 15947.493372485042,
+    "seed": 2026
+  },
+  "full_preflights": [
+    {
+      "seed": 2026,
+      "groups": 256,
+      "responses_per_group": 8,
+      "sampling": {
+        "temperature": 0.8,
+        "top_p": 1.0,
+        "seed": 2026,
+        "request_seed_scheme": "sha256_base_seed_and_flat_index_v1"
+      },
+      "generation": {
+        "max_new_tokens": 256,
+        "num_generations": 8,
+        "eos_token_ids": [
+          151645,
+          151643
+        ]
+      },
+      "rollout_metrics": {
+        "elapsed_seconds": 42.52847508247942,
+        "generated_tokens": 422994,
+        "tokens_per_sec": 9946.136069531025
+      },
+      "rollout_sha256": "52c8f2bbe274e578379c89bd6e30dde2e364d286f33d39014783e038bcaf9bbf",
+      "rollout_provenance": {
+        "git_revision": "5b25478c513f92613f924324a4fbad61c6489f65",
+        "git_dirty": true,
+        "command": "/data/InferKernelLab/src/inferkernellab/rollout.py --engine sglang --sglang-base-url http://127.0.0.1:30000 --sglang-timeout 600 --model-source path --model-path /data/models/Qwen/Qwen3-0.6B --prompts /data/MiniTrainBench/results/gsm8k_grpo/data/train.jsonl --data-manifest /data/MiniTrainBench/results/gsm8k_grpo/data/manifest.json --output /data/MiniTrainBench/results/gsm8k_grpo/validation_hashed/seed_2026/rollout.jsonl --dtype bfloat16 --num-generations 8 --max-new-tokens 256 --temperature 0.8 --top-p 1.0 --seed 2026",
+        "source_sha256": "032355ac0a9d32407129c6f629035a215f7d26054b2eb678525c7ecb5738e62f"
+      },
+      "preflight": {
+        "attention_implementation": "sdpa",
+        "benchmark": "grpo_preflight",
+        "data_fingerprint": "03a8a84ce5031499274a9051fb24a7ce1ca2bb52d1c4f3ff80f46ece33ac0eab",
+        "environment": {
+          "cuda": "12.4",
+          "cudnn": "90100",
+          "driver": "580.173.02",
+          "gpu": "NVIDIA A100-SXM4-40GB",
+          "gpu_count": 2,
+          "nccl": "2.21.5",
+          "python": "3.10.12",
+          "torch": "2.6.0+cu124"
+        },
+        "initial_policy_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+        "logprob_probe": {
+          "baseline_ratio_outside_0_8_1_2_fraction": 0.0040544308722019196,
+          "max_abs_error": 0.6526312828063965,
+          "mean_abs_error": 0.011140523478388786,
+          "p99_abs_error": 0.15566594898700714,
+          "passed": false,
+          "token_count": 422994,
+          "tolerance": 0.5,
+          "worst": {
+            "abs_error": 0.6526312828063965,
+            "completion": 1,
+            "current_logprob": -4.0588812828063965,
+            "group_id": "train-907",
+            "old_logprob": -3.40625,
+            "response_position": 165
+          }
+        },
+        "optimizer_updated": false,
+        "precision": "bf16",
+        "provenance": {
+          "base_image": null,
+          "build_revision": null,
+          "command": null,
+          "complete": false,
+          "git_dirty": true,
+          "git_revision": "84fdc54716046333c0d4819ceb8b2ad29e323cab",
+          "image_id": null,
+          "image_ref": null,
+          "missing_fields": [
+            "base_image",
+            "build_revision",
+            "clean_worktree",
+            "command",
+            "image_id",
+            "image_ref"
+          ]
+        },
+        "rollout_sha256": "52c8f2bbe274e578379c89bd6e30dde2e364d286f33d39014783e038bcaf9bbf",
+        "schema_version": 1,
+        "sglang_server": {
+          "attention_backend": "fa3",
+          "dtype": "auto",
+          "enable_deterministic_inference": true,
+          "enable_fp32_lm_head": false,
+          "model_path": "/data/models/Qwen/Qwen3-0.6B",
+          "rl_on_policy_target": "fsdp",
+          "sampling_backend": "pytorch",
+          "version": "0.5.18"
+        },
+        "source_sha256": "b88213ce5783b9ebe1ec543cc338cc875a2131e90abd48f89ab040ff665365b2",
+        "stage": "policy_logprob_preflight",
+        "status": "failed",
+        "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+        "world_size": 2
+      }
+    },
+    {
+      "seed": 2027,
+      "groups": 256,
+      "responses_per_group": 8,
+      "sampling": {
+        "temperature": 0.8,
+        "top_p": 1.0,
+        "seed": 2027,
+        "request_seed_scheme": "sha256_base_seed_and_flat_index_v1"
+      },
+      "generation": {
+        "max_new_tokens": 256,
+        "num_generations": 8,
+        "eos_token_ids": [
+          151645,
+          151643
+        ]
+      },
+      "rollout_metrics": {
+        "elapsed_seconds": 41.605602716095746,
+        "generated_tokens": 419699,
+        "tokens_per_sec": 10087.559669881508
+      },
+      "rollout_sha256": "9ee88e7853a302d1059825e4617cb1c64482a3f824aae32666d6f742a2fcbca5",
+      "rollout_provenance": {
+        "git_revision": "5b25478c513f92613f924324a4fbad61c6489f65",
+        "git_dirty": true,
+        "command": "/data/InferKernelLab/src/inferkernellab/rollout.py --engine sglang --sglang-base-url http://127.0.0.1:30000 --sglang-timeout 600 --model-source path --model-path /data/models/Qwen/Qwen3-0.6B --prompts /data/MiniTrainBench/results/gsm8k_grpo/data/train.jsonl --data-manifest /data/MiniTrainBench/results/gsm8k_grpo/data/manifest.json --output /data/MiniTrainBench/results/gsm8k_grpo/validation_hashed/seed_2027/rollout.jsonl --dtype bfloat16 --num-generations 8 --max-new-tokens 256 --temperature 0.8 --top-p 1.0 --seed 2027",
+        "source_sha256": "032355ac0a9d32407129c6f629035a215f7d26054b2eb678525c7ecb5738e62f"
+      },
+      "preflight": {
+        "attention_implementation": "sdpa",
+        "benchmark": "grpo_preflight",
+        "data_fingerprint": "03a8a84ce5031499274a9051fb24a7ce1ca2bb52d1c4f3ff80f46ece33ac0eab",
+        "environment": {
+          "cuda": "12.4",
+          "cudnn": "90100",
+          "driver": "580.173.02",
+          "gpu": "NVIDIA A100-SXM4-40GB",
+          "gpu_count": 2,
+          "nccl": "2.21.5",
+          "python": "3.10.12",
+          "torch": "2.6.0+cu124"
+        },
+        "initial_policy_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+        "logprob_probe": {
+          "baseline_ratio_outside_0_8_1_2_fraction": 0.003847995772957802,
+          "max_abs_error": 1.254300832748413,
+          "mean_abs_error": 0.011157358065247536,
+          "p99_abs_error": 0.15428851544857025,
+          "passed": false,
+          "token_count": 419699,
+          "tolerance": 0.5,
+          "worst": {
+            "abs_error": 1.254300832748413,
+            "completion": 7,
+            "current_logprob": -1.758207082748413,
+            "group_id": "train-1499",
+            "old_logprob": -0.50390625,
+            "response_position": 116
+          }
+        },
+        "optimizer_updated": false,
+        "precision": "bf16",
+        "provenance": {
+          "base_image": null,
+          "build_revision": null,
+          "command": null,
+          "complete": false,
+          "git_dirty": true,
+          "git_revision": "84fdc54716046333c0d4819ceb8b2ad29e323cab",
+          "image_id": null,
+          "image_ref": null,
+          "missing_fields": [
+            "base_image",
+            "build_revision",
+            "clean_worktree",
+            "command",
+            "image_id",
+            "image_ref"
+          ]
+        },
+        "rollout_sha256": "9ee88e7853a302d1059825e4617cb1c64482a3f824aae32666d6f742a2fcbca5",
+        "schema_version": 1,
+        "sglang_server": {
+          "attention_backend": "fa3",
+          "dtype": "auto",
+          "enable_deterministic_inference": true,
+          "enable_fp32_lm_head": false,
+          "model_path": "/data/models/Qwen/Qwen3-0.6B",
+          "rl_on_policy_target": "fsdp",
+          "sampling_backend": "pytorch",
+          "version": "0.5.18"
+        },
+        "source_sha256": "6c099da7b6b3ffe2375eaab68492331035d9642931bb29d57b9872af52d90b29",
+        "stage": "policy_logprob_preflight",
+        "status": "failed",
+        "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+        "world_size": 2
+      }
+    },
+    {
+      "seed": 2028,
+      "groups": 256,
+      "responses_per_group": 8,
+      "sampling": {
+        "temperature": 0.8,
+        "top_p": 1.0,
+        "seed": 2028,
+        "request_seed_scheme": "sha256_base_seed_and_flat_index_v1"
+      },
+      "generation": {
+        "max_new_tokens": 256,
+        "num_generations": 8,
+        "eos_token_ids": [
+          151645,
+          151643
+        ]
+      },
+      "rollout_metrics": {
+        "elapsed_seconds": 42.29032588005066,
+        "generated_tokens": 425292,
+        "tokens_per_sec": 10056.48434127154
+      },
+      "rollout_sha256": "33073ada65c76a9384a56e664c8461b417efca10a94572810d31b4c73a43f153",
+      "rollout_provenance": {
+        "git_revision": "5b25478c513f92613f924324a4fbad61c6489f65",
+        "git_dirty": true,
+        "command": "/data/InferKernelLab/src/inferkernellab/rollout.py --engine sglang --sglang-base-url http://127.0.0.1:30000 --sglang-timeout 600 --model-source path --model-path /data/models/Qwen/Qwen3-0.6B --prompts /data/MiniTrainBench/results/gsm8k_grpo/data/train.jsonl --data-manifest /data/MiniTrainBench/results/gsm8k_grpo/data/manifest.json --output /data/MiniTrainBench/results/gsm8k_grpo/validation_hashed/seed_2028/rollout.jsonl --dtype bfloat16 --num-generations 8 --max-new-tokens 256 --temperature 0.8 --top-p 1.0 --seed 2028",
+        "source_sha256": "032355ac0a9d32407129c6f629035a215f7d26054b2eb678525c7ecb5738e62f"
+      },
+      "preflight": {
+        "attention_implementation": "sdpa",
+        "benchmark": "grpo_preflight",
+        "command": [
+          "/data/MiniTrainBench/src/minitrainbench/__main__.py",
+          "rl",
+          "grpo-train",
+          "--model-path",
+          "/data/models/Qwen/Qwen3-0.6B",
+          "--rollouts",
+          "results/gsm8k_grpo/validation_hashed/seed_2028/rollout.jsonl",
+          "--output-model",
+          "results/gsm8k_grpo/validation_hashed/seed_2028/updated_model",
+          "--output",
+          "results/gsm8k_grpo/validation_hashed/seed_2028/train.json",
+          "--device",
+          "cuda",
+          "--backend",
+          "nccl",
+          "--precision",
+          "bf16",
+          "--steps",
+          "16",
+          "--groups-per-step",
+          "8",
+          "--microbatch-groups",
+          "1",
+          "--attention-implementation",
+          "sdpa",
+          "--learning-rate",
+          "1e-6",
+          "--seed",
+          "2028",
+          "--logprob-tolerance",
+          "0.5",
+          "--preflight-only"
+        ],
+        "data_fingerprint": "03a8a84ce5031499274a9051fb24a7ce1ca2bb52d1c4f3ff80f46ece33ac0eab",
+        "environment": {
+          "cuda": "12.4",
+          "cudnn": "90100",
+          "driver": "580.173.02",
+          "gpu": "NVIDIA A100-SXM4-40GB",
+          "gpu_count": 2,
+          "nccl": "2.21.5",
+          "python": "3.10.12",
+          "torch": "2.6.0+cu124"
+        },
+        "initial_policy_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+        "logprob_probe": {
+          "baseline_ratio_outside_0_8_1_2_fraction": 0.0038914440665394068,
+          "max_abs_error": 0.8115859031677246,
+          "mean_abs_error": 0.01112332008779049,
+          "p99_abs_error": 0.15399207174777985,
+          "passed": false,
+          "token_count": 425292,
+          "tolerance": 0.5,
+          "worst": {
+            "abs_error": 0.8115859031677246,
+            "completion": 6,
+            "current_logprob": -4.905335903167725,
+            "group_id": "train-3487",
+            "old_logprob": -4.09375,
+            "response_position": 111
+          }
+        },
+        "optimizer_updated": false,
+        "precision": "bf16",
+        "provenance": {
+          "base_image": null,
+          "build_revision": null,
+          "command": null,
+          "complete": false,
+          "git_dirty": true,
+          "git_revision": "84fdc54716046333c0d4819ceb8b2ad29e323cab",
+          "image_id": null,
+          "image_ref": null,
+          "missing_fields": [
+            "base_image",
+            "build_revision",
+            "clean_worktree",
+            "command",
+            "image_id",
+            "image_ref"
+          ]
+        },
+        "rollout_sha256": "33073ada65c76a9384a56e664c8461b417efca10a94572810d31b4c73a43f153",
+        "schema_version": 1,
+        "sglang_server": {
+          "attention_backend": "fa3",
+          "dtype": "auto",
+          "enable_deterministic_inference": true,
+          "enable_fp32_lm_head": false,
+          "model_path": "/data/models/Qwen/Qwen3-0.6B",
+          "rl_on_policy_target": "fsdp",
+          "sampling_backend": "pytorch",
+          "version": "0.5.18"
+        },
+        "source_sha256": "6c099da7b6b3ffe2375eaab68492331035d9642931bb29d57b9872af52d90b29",
+        "stage": "policy_logprob_preflight",
+        "status": "failed",
+        "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+        "world_size": 2
+      }
+    }
+  ],
+  "small_training_smoke": {
+    "scope": "4 train questions, 8 responses each, max_new_tokens=256; two DDP steps; not the 256-question experiment",
+    "request_seed_scheme": "legacy_base_seed_plus_flat_index; single seed only",
+    "training": {
+      "attention_implementation": "sdpa",
+      "benchmark": "grpo_training",
+      "checkpoint_dir": "/tmp/gsm8k_smoke_final/checkpoints_256",
+      "clip_fraction_mean": 0.005729796248488128,
+      "command": [
+        "/data/MiniTrainBench/src/minitrainbench/__main__.py",
+        "rl",
+        "grpo-train",
+        "--model-path",
+        "/data/models/Qwen/Qwen3-0.6B",
+        "--rollouts",
+        "/tmp/gsm8k_smoke_final/rollout_256.jsonl",
+        "--output-model",
+        "/tmp/gsm8k_smoke_final/full_length_continuous",
+        "--output",
+        "/tmp/gsm8k_smoke_final/full_length_continuous.json",
+        "--device",
+        "cuda",
+        "--backend",
+        "nccl",
+        "--precision",
+        "bf16",
+        "--steps",
+        "2",
+        "--groups-per-step",
+        "2",
+        "--microbatch-groups",
+        "1",
+        "--attention-implementation",
+        "sdpa",
+        "--learning-rate",
+        "1e-6",
+        "--seed",
+        "2026",
+        "--logprob-tolerance",
+        ".5",
+        "--checkpoint-dir",
+        "/tmp/gsm8k_smoke_final/checkpoints_256",
+        "--save-every",
+        "1"
+      ],
+      "data_fingerprint": "a0fb0da0980bf3494e72e689fa76f0d7815185193efc435b5bf6ed091e9fc9b1",
+      "dp_parameters_consistent": true,
+      "environment": {
+        "cuda": "12.4",
+        "cudnn": "90100",
+        "device": "cuda:0",
+        "driver": "580.173.02",
+        "gpu": "NVIDIA A100-SXM4-40GB",
+        "gpu_count": 2,
+        "nccl": "2.21.5",
+        "python": "3.10.12",
+        "torch": "2.6.0+cu124"
+      },
+      "global_step": 2,
+      "grad_norm_max": 1.3440126180648804,
+      "initial_logprob_max_error": 0.4098024368286133,
+      "initial_policy_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+      "logprob_probe": {
+        "baseline_ratio_outside_0_8_1_2_fraction": 0.004467724356800318,
+        "max_abs_error": 0.4098024368286133,
+        "mean_abs_error": 0.010047558695077896,
+        "p99_abs_error": 0.1496984362602234,
+        "passed": true,
+        "token_count": 6491,
+        "tolerance": 0.5,
+        "worst": {
+          "abs_error": 0.4098024368286133,
+          "completion": 3,
+          "current_logprob": -4.183947563171387,
+          "group_id": "train-2617",
+          "old_logprob": -4.59375,
+          "response_position": 149
+        }
+      },
+      "logprob_tolerance": 0.5,
+      "loss_mean": -3.75062810462623e-05,
+      "optimizer_updated": true,
+      "output_model": "/tmp/gsm8k_smoke_final/full_length_continuous",
+      "peak_memory_allocated_bytes": 25746937344,
+      "policy_state_sha256": "cb5906e0de9eb27705e25522dec145335bf067298ef94af60126b6a72646c502",
+      "precision": "bf16",
+      "prompt_groups": 4,
+      "provenance": {
+        "base_image": null,
+        "build_revision": null,
+        "command": null,
+        "complete": false,
+        "git_dirty": true,
+        "git_revision": "84fdc54716046333c0d4819ceb8b2ad29e323cab",
+        "image_id": null,
+        "image_ref": null,
+        "missing_fields": [
+          "base_image",
+          "build_revision",
+          "clean_worktree",
+          "command",
+          "image_id",
+          "image_ref"
+        ]
+      },
+      "response_tokens_seen": 12982,
+      "responses_per_group": 8,
+      "resumed": false,
+      "reward_mean": 0.53125,
+      "rollout_sha256": "e2947c1388d9e47b062c24528951bde910e77c99729c78dfbc43e669a9abb17b",
+      "sampled_kl_mean": 0.00020401545043569058,
+      "schema_version": 1,
+      "sglang_server": {
+        "attention_backend": "fa3",
+        "dtype": "auto",
+        "enable_deterministic_inference": true,
+        "enable_fp32_lm_head": false,
+        "model_path": "/data/models/Qwen/Qwen3-0.6B",
+        "rl_on_policy_target": "fsdp",
+        "sampling_backend": "pytorch",
+        "version": "0.5.18"
+      },
+      "source_sha256": "5e7ba5967394d04d26e8af3635154b2265d8e8eec87187de7a1331f6be780fe1",
+      "status": "ok",
+      "step_time_ms_mean": 735.4632616043091,
+      "strategy": "ddp",
+      "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+      "tokens_per_sec": 8825.72976635271,
+      "tokens_seen": 12982,
+      "updated_policy_fingerprint": "e21620c20b224e7bdd91050ee8a5b1acdf70ece53c6fb3a5183e7bae287ec2de",
+      "world_size": 2,
+      "zero_variance_groups": 6
+    },
+    "resume": {
+      "attention_implementation": "sdpa",
+      "benchmark": "grpo_training",
+      "checkpoint_dir": "/tmp/gsm8k_smoke_final/checkpoints_resumed",
+      "clip_fraction_mean": 0.006707160966470838,
+      "command": [
+        "/data/MiniTrainBench/src/minitrainbench/__main__.py",
+        "rl",
+        "grpo-train",
+        "--model-path",
+        "/data/models/Qwen/Qwen3-0.6B",
+        "--rollouts",
+        "/tmp/gsm8k_smoke_final/rollout_256.jsonl",
+        "--output-model",
+        "/tmp/gsm8k_smoke_final/full_length_resumed",
+        "--output",
+        "/tmp/gsm8k_smoke_final/full_length_resumed.json",
+        "--device",
+        "cuda",
+        "--backend",
+        "nccl",
+        "--precision",
+        "bf16",
+        "--steps",
+        "2",
+        "--groups-per-step",
+        "2",
+        "--microbatch-groups",
+        "1",
+        "--attention-implementation",
+        "sdpa",
+        "--learning-rate",
+        "1e-6",
+        "--seed",
+        "2026",
+        "--logprob-tolerance",
+        ".5",
+        "--checkpoint-dir",
+        "/tmp/gsm8k_smoke_final/checkpoints_resumed",
+        "--save-every",
+        "1",
+        "--resume",
+        "/tmp/gsm8k_smoke_final/checkpoints_256/step_00000001"
+      ],
+      "data_fingerprint": "a0fb0da0980bf3494e72e689fa76f0d7815185193efc435b5bf6ed091e9fc9b1",
+      "dp_parameters_consistent": true,
+      "environment": {
+        "cuda": "12.4",
+        "cudnn": "90100",
+        "device": "cuda:0",
+        "driver": "580.173.02",
+        "gpu": "NVIDIA A100-SXM4-40GB",
+        "gpu_count": 2,
+        "nccl": "2.21.5",
+        "python": "3.10.12",
+        "torch": "2.6.0+cu124"
+      },
+      "global_step": 2,
+      "grad_norm_max": 1.2732532024383545,
+      "initial_logprob_max_error": 0.4098024368286133,
+      "initial_policy_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+      "logprob_probe": {
+        "baseline_ratio_outside_0_8_1_2_fraction": 0.004467724356800318,
+        "max_abs_error": 0.4098024368286133,
+        "mean_abs_error": 0.010047558695077896,
+        "p99_abs_error": 0.1496984362602234,
+        "passed": true,
+        "token_count": 6491,
+        "tolerance": 0.5,
+        "worst": {
+          "abs_error": 0.4098024368286133,
+          "completion": 3,
+          "current_logprob": -4.183947563171387,
+          "group_id": "train-2617",
+          "old_logprob": -4.59375,
+          "response_position": 149
+        }
+      },
+      "logprob_tolerance": 0.5,
+      "loss_mean": -0.00011749949794648273,
+      "optimizer_updated": true,
+      "output_model": "/tmp/gsm8k_smoke_final/full_length_resumed",
+      "peak_memory_allocated_bytes": 25783235072,
+      "policy_state_sha256": "cb5906e0de9eb27705e25522dec145335bf067298ef94af60126b6a72646c502",
+      "precision": "bf16",
+      "prompt_groups": 4,
+      "provenance": {
+        "base_image": null,
+        "build_revision": null,
+        "command": null,
+        "complete": false,
+        "git_dirty": true,
+        "git_revision": "84fdc54716046333c0d4819ceb8b2ad29e323cab",
+        "image_id": null,
+        "image_ref": null,
+        "missing_fields": [
+          "base_image",
+          "build_revision",
+          "clean_worktree",
+          "command",
+          "image_id",
+          "image_ref"
+        ]
+      },
+      "response_tokens_seen": 6491,
+      "responses_per_group": 8,
+      "resumed": true,
+      "reward_mean": 0.53125,
+      "rollout_sha256": "e2947c1388d9e47b062c24528951bde910e77c99729c78dfbc43e669a9abb17b",
+      "sampled_kl_mean": 0.00040803090087138116,
+      "schema_version": 1,
+      "sglang_server": {
+        "attention_backend": "fa3",
+        "dtype": "auto",
+        "enable_deterministic_inference": true,
+        "enable_fp32_lm_head": false,
+        "model_path": "/data/models/Qwen/Qwen3-0.6B",
+        "rl_on_policy_target": "fsdp",
+        "sampling_backend": "pytorch",
+        "version": "0.5.18"
+      },
+      "source_sha256": "5e7ba5967394d04d26e8af3635154b2265d8e8eec87187de7a1331f6be780fe1",
+      "status": "ok",
+      "step_time_ms_mean": 2724.0607738494873,
+      "strategy": "ddp",
+      "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+      "tokens_per_sec": 2382.8396423135923,
+      "tokens_seen": 12982,
+      "updated_policy_fingerprint": "e21620c20b224e7bdd91050ee8a5b1acdf70ece53c6fb3a5183e7bae287ec2de",
+      "world_size": 2,
+      "zero_variance_groups": 3
+    },
+    "resume_parameter_digest_matches": true,
+    "updated_full_test": {
+      "task": "gsm8k",
+      "model_path": "/tmp/gsm8k_smoke_final/full_length_continuous",
+      "model_fingerprint": "e21620c20b224e7bdd91050ee8a5b1acdf70ece53c6fb3a5183e7bae287ec2de",
+      "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+      "data_sha256": "cbd53f6e036445b6a00e0aa96b354b4a265b37338d0583940a2f52e473cdc256",
+      "sglang_server": {
+        "version": "0.5.18",
+        "model_path": "/model",
+        "dtype": "bfloat16",
+        "attention_backend": "fa3",
+        "sampling_backend": "pytorch",
+        "enable_fp32_lm_head": false,
+        "enable_deterministic_inference": true,
+        "rl_on_policy_target": "fsdp"
+      },
+      "provenance": {
+        "git_revision": "5b25478c513f92613f924324a4fbad61c6489f65",
+        "git_dirty": true
+      },
+      "max_new_tokens": 256,
+      "batch_size": 128,
+      "temperature": 0.0,
+      "prompt_format": "gsm8k_chat_no_thinking_v1",
+      "count": 1319,
+      "exact_match": 0.513267626990144,
+      "correct": 677,
+      "generated_tokens": 277830,
+      "throughput_samples_per_sec": 7.771159156495617,
+      "batch_latency_p50_ms": 15387.401808984578,
+      "batch_latency_p95_ms": 15514.139640145004,
+      "seed": 2026
+    },
+    "prompt_tokenization_check": {
+      "questions": 1319,
+      "mismatches": 0
+    },
+    "exact_match_change": 0.0
+  },
+  "updated_policy_three_seed_statistics": null,
+  "not_completed": [
+    "256-question BF16 GRPO update for each seed",
+    "three updated policies full-test evaluation",
+    "three-seed updated accuracy mean/std"
+  ],
+  "tests": {
+    "minitrainbench_full_pytest": 57,
+    "inferkernellab_full_pytest": 92
+  },
+  "limitations": [
+    "Full token-wise max logprob error must be <= 0.5; all three independent-seed probes failed.",
+    "Host HF and container SGLang use different Torch/Transformers versions; matching container HF alone did not establish full alignment.",
+    "Data and weights are local experiment artifacts, not committed.",
+    "Measured before feature commits with dirty worktrees; raw parent revisions/source hashes are retained. Host provenance is incomplete.",
+    "Rollout throughput includes HTTP and collection costs; short training smoke is not a steady-state performance benchmark.",
+    "Initial greedy local EM uses no-thinking chat prompt, max 256 tokens, marked-answer/last-number fallback; not a standard benchmark score."
+  ]
+}

@@ -298,6 +298,11 @@ def paged_prefill_attention_sdpa(
     start_tensor = torch.as_tensor(starts_list, dtype=torch.long, device=cache.device)
     length_tensor = torch.as_tensor(lengths_list, dtype=torch.long, device=cache.device)
     key_length_mask = key_positions.view(1, 1, -1) < length_tensor.view(-1, 1, 1)
+    # Masked SDPA positions can still propagate NaNs from uninitialized value
+    # slots (zero attention weight times NaN). Do not expose unread cache slots.
+    valid_keys = key_length_mask.squeeze(1).unsqueeze(-1).unsqueeze(-1)
+    key = key.masked_fill(~valid_keys, 0)
+    value = value.masked_fill(~valid_keys, 0)
     valid_query = query_positions.view(1, -1, 1) < (
         length_tensor - start_tensor
     ).view(-1, 1, 1)

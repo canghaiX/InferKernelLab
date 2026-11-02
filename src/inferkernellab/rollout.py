@@ -8,12 +8,15 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from .gsm8k import format_gsm8k_prompt, gsm8k_exact_match
 from .hf_benchmark import LlamaPagedDecodeRunner, _dtype, _load_model, _resolve_device
+from .sglang_client import SGLangClient
 
 _MODEL_FILE_SUFFIXES = (".safetensors", ".bin", ".index.json")
 _TOKENIZER_FILES = {
@@ -72,7 +75,9 @@ def tokenizer_fingerprint(tokenizer_path: str | Path, vocab_size: int) -> str:
 
 def _load_prompt_rows(path: Path) -> list[dict[str, Any]]:
     rows = []
-    for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").split("\n"), start=1
+    ):
         if not line.strip():
             continue
         try:
@@ -114,6 +119,11 @@ def _encode_prompts(
             prompt = tuple(row["prompt_tokens"])
             target = tuple(row["target_tokens"])
             prompt_text = target_text = None
+        elif "question" in row and "answer" in row and tokenizer is not None:
+            prompt_text = format_gsm8k_prompt(tokenizer, str(row["question"]))
+            target_text = str(row["answer"])
+            prompt = tuple(tokenizer.encode(prompt_text, add_special_tokens=False))
+            target = tuple(tokenizer.encode(target_text, add_special_tokens=False))
         elif "prompt" in row and "target" in row and tokenizer is not None:
             prompt_text = str(row["prompt"])
             target_text = str(row["target"])
@@ -135,6 +145,203 @@ def _encode_prompts(
         prompt_texts.append(prompt_text)
         target_texts.append(target_text)
     return prompts, targets, prompt_texts, target_texts
+
+
+def _write_manifest(
+    output: str, manifest: dict[str, Any], groups: list[dict[str, Any]]
+) -> dict[str, Any]:
+    destination = Path(output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(manifest, ensure_ascii=False) + "\n")
+        for group in groups:
+            stream.write(json.dumps(group, ensure_ascii=False) + "\n")
+    os.replace(temporary, destination)
+    return manifest
+
+
+def _run_sglang(args: argparse.Namespace) -> dict[str, Any]:
+    if args.model_source != "path" or not args.model_path:
+        raise ValueError("SGLang rollout requires --model-source path and --model-path")
+    if not args.sglang_base_url:
+        raise ValueError("SGLang rollout requires --sglang-base-url")
+    try:
+        from transformers import AutoConfig
+    except ImportError as error:
+        raise RuntimeError(
+            "SGLang rollout requires 'transformers' for the local tokenizer"
+        ) from error
+    model_path = Path(args.model_path)
+    config = AutoConfig.from_pretrained(model_path, local_files_only=True)
+    tokenizer_path = args.tokenizer_path or args.model_path
+    tokenizer = _load_tokenizer(tokenizer_path)
+    rows = _load_prompt_rows(Path(args.prompts))
+    is_gsm8k = all("question" in row and "answer" in row for row in rows)
+    if is_gsm8k and not args.data_manifest:
+        raise ValueError("GSM8K rollout requires --data-manifest from prepare_gsm8k.py")
+    if args.data_manifest:
+        # Fail before generating when the manifest is missing or malformed.
+        json.loads(Path(args.data_manifest).read_text())
+    prompts, targets, prompt_texts, target_texts = _encode_prompts(
+        rows, tokenizer=tokenizer, vocab_size=int(config.vocab_size)
+    )
+    expanded_prompts = [
+        prompt for prompt in prompts for _ in range(args.num_generations)
+    ]
+    client = SGLangClient(args.sglang_base_url, timeout=args.sglang_timeout)
+    server_info = client.server_info()
+    if server_info["version"] != "0.5.18":
+        raise ValueError("SGLang rollout requires server version 0.5.18")
+    eos_ids = (
+        config.eos_token_id
+        if isinstance(config.eos_token_id, list)
+        else [config.eos_token_id]
+    )
+    try:
+        from transformers import GenerationConfig
+
+        generation_config = GenerationConfig.from_pretrained(
+            model_path, local_files_only=True
+        )
+        configured_eos = generation_config.eos_token_id
+        if configured_eos is not None:
+            eos_ids = (
+                configured_eos if isinstance(configured_eos, list) else [configured_eos]
+            )
+    except (OSError, TypeError, ValueError):
+        pass
+    eos_ids = [int(token) for token in eos_ids if token is not None]
+    started = time.perf_counter()
+    generations = client.generate(
+        expanded_prompts,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        seeds=_request_sampling_seeds(args.seed, len(expanded_prompts)),
+        stop_token_ids=eos_ids,
+    )
+    generation_seconds = time.perf_counter() - started
+    groups = []
+    for group_index, (prompt, target) in enumerate(zip(prompts, targets)):
+        completions = []
+        for offset in range(args.num_generations):
+            generation = generations[group_index * args.num_generations + offset]
+            reward = (
+                gsm8k_exact_match(generation.text, target_texts[group_index] or "")
+                if is_gsm8k
+                else _prefix_accuracy(generation.token_ids, target)
+            )
+            completions.append(
+                {
+                    "response_tokens": list(generation.token_ids),
+                    "response_text": generation.text,
+                    "old_logprobs": list(generation.token_logprobs),
+                    "sampling_logprobs": list(generation.token_logprobs),
+                    "reward": reward,
+                    "finish_reason": generation.finish_reason,
+                }
+            )
+        group = {
+            "type": "prompt_group",
+            "group_id": str(
+                rows[group_index].get(
+                    "id", rows[group_index].get("group_id", group_index)
+                )
+            ),
+            "prompt_tokens": list(prompt),
+            "target_tokens": list(target),
+            "prompt_text": prompt_texts[group_index],
+            "target_text": target_texts[group_index],
+            "completions": completions,
+        }
+        if is_gsm8k:
+            group["task"] = "gsm8k"
+            group["answer"] = str(rows[group_index]["answer"])
+        groups.append(group)
+    manifest = {
+        "type": "manifest",
+        "schema_version": 1,
+        "architecture": (config.architectures or ["AutoModelForCausalLM"])[0],
+        "model_type": config.model_type,
+        "model_source": str(model_path),
+        "model_fingerprint": model_fingerprint(model_path),
+        "tokenizer_fingerprint": tokenizer_fingerprint(
+            tokenizer_path, int(config.vocab_size)
+        ),
+        "tokenizer_mode": "text",
+        "vocab_size": int(config.vocab_size),
+        "task": "gsm8k" if is_gsm8k else "generic",
+        "prompt_format": "gsm8k_chat_no_thinking_v1" if is_gsm8k else None,
+        "sampling": {
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "seed": args.seed,
+            "request_seed_scheme": "sha256_base_seed_and_flat_index_v1",
+        },
+        "logprob_convention": "temperature_scaled_untruncated_policy",
+        "logprob_tolerance": 0.5
+        if config.model_type == "qwen3" and args.dtype == "bfloat16"
+        else None,
+        "generation": {
+            "max_new_tokens": args.max_new_tokens,
+            "num_generations": args.num_generations,
+            "eos_token_ids": eos_ids,
+        },
+        "reward_function": "gsm8k_exact_match_v1"
+        if is_gsm8k
+        else "token_prefix_accuracy_v1",
+        "prompt_group_count": len(groups),
+        "backend": "sglang",
+        "engine": "sglang",
+        "sglang_base_url": args.sglang_base_url,
+        "rollout_metrics": {
+            "elapsed_seconds": generation_seconds,
+            "generated_tokens": sum(len(item.token_ids) for item in generations),
+            "tokens_per_sec": sum(len(item.token_ids) for item in generations)
+            / max(generation_seconds, 1e-9),
+        },
+        "sglang_server": server_info,
+        "sglang_server_fingerprint": hashlib.sha256(
+            json.dumps(server_info, sort_keys=True).encode()
+        ).hexdigest(),
+        "dtype": args.dtype,
+        "cache_released": None,
+        "environment": {
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "device": "sglang",
+        },
+        "provenance": {
+            "git_revision": _git_revision(),
+            "git_dirty": _git_dirty(),
+            "command": " ".join(sys.argv),
+            "source_sha256": _fingerprint_files(
+                Path(__file__).parent, lambda path: path.suffix == ".py"
+            ),
+        },
+    }
+    if args.data_manifest:
+        manifest["data_manifest"] = str(Path(args.data_manifest).resolve())
+        manifest["data_fingerprint"] = hashlib.sha256(
+            Path(args.data_manifest).read_bytes()
+        ).hexdigest()
+        manifest["data_metadata"] = json.loads(Path(args.data_manifest).read_text())
+        manifest["prompt_file"] = str(Path(args.prompts).resolve())
+        manifest["prompt_file_sha256"] = hashlib.sha256(
+            Path(args.prompts).read_bytes()
+        ).hexdigest()
+    return _write_manifest(args.output, manifest, groups)
+
+
+def _request_sampling_seeds(seed: int, count: int) -> list[int]:
+    # Adding the index to adjacent base seeds would reuse 7/8 draws per group
+    # across seeds 2026/2027/2028. Hash each pair into an independent stream.
+    return [
+        int.from_bytes(hashlib.sha256(f"{seed}:{index}".encode()).digest()[:4], "big")
+        & 0x7FFFFFFF
+        for index in range(count)
+    ]
 
 
 def _prefix_accuracy(response: tuple[int, ...], target: tuple[int, ...]) -> float:
@@ -187,6 +394,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("random models require --export-model-path for later training")
     if args.model_source == "path" and not args.model_path:
         raise ValueError("--model-path is required for model-source=path")
+    if getattr(args, "engine", "paged_hf") == "sglang":
+        return _run_sglang(args)
 
     device = _resolve_device(args.device)
     dtype = _dtype(args.dtype)
@@ -275,6 +484,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "type": "manifest",
         "schema_version": 1,
         "architecture": "LlamaForCausalLM",
+        "model_type": "llama",
         "model_source": source,
         "model_fingerprint": model_fingerprint(model_path),
         "tokenizer_fingerprint": tokenizer_fp,
@@ -325,15 +535,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "command": " ".join(sys.argv),
         },
     }
-    destination = Path(args.output)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as stream:
-        stream.write(json.dumps(manifest, ensure_ascii=False) + "\n")
-        for group in groups:
-            stream.write(json.dumps(group, ensure_ascii=False) + "\n")
-    os.replace(temporary, destination)
-    return manifest
+    return _write_manifest(args.output, manifest, groups)
 
 
 def _git_revision() -> str | None:
@@ -383,7 +585,11 @@ def _git_dirty() -> bool | None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate local Llama GRPO rollouts")
+    parser = argparse.ArgumentParser(description="Generate local GRPO rollouts")
+    parser.add_argument("--engine", choices=("paged_hf", "sglang"), default="paged_hf")
+    parser.add_argument("--sglang-base-url", default=None)
+    parser.add_argument("--sglang-timeout", type=float, default=120.0)
+    parser.add_argument("--data-manifest", default=None)
     parser.add_argument("--model-source", choices=("random", "path"), default="path")
     parser.add_argument("--model-path")
     parser.add_argument("--export-model-path")

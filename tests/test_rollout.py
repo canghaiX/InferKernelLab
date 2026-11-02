@@ -6,8 +6,10 @@ import torch
 
 pytest.importorskip("transformers")
 
+from inferkernellab.gsm8k import extract_gsm8k_answer, gsm8k_exact_match
 from inferkernellab.hf_benchmark import LlamaPagedDecodeRunner, _load_model
 from inferkernellab.rollout import run
+from inferkernellab.sglang_client import parse_generate_response
 
 
 def _rollout_args(tmp_path, *, output_name="rollouts.jsonl"):
@@ -171,3 +173,32 @@ def test_seeded_sampling_logprobs_match_hf_eager(tmp_path):
                 policy[token], torch.tensor(logprob), atol=1e-6, rtol=1e-6
             )
     assert first.cache_released
+
+
+def test_gsm8k_answer_parser_prefers_marked_answer():
+    assert extract_gsm8k_answer("work 2 + 2 = 4\n#### 4") == "4"
+    assert extract_gsm8k_answer("The result is 1,024") == "1024"
+    assert gsm8k_exact_match("reasoning\n#### 18", "#### 18") == 1.0
+    assert gsm8k_exact_match("#### 17", "#### 18") == 0.0
+
+
+def test_sglang_logprob_response_parser_supports_meta_info():
+    payload = {
+        "text": "42",
+        "meta_info": {
+            "output_token_ids": [42, 43],
+            "output_token_logprobs": [[-0.5, 42], [-0.25, 43]],
+            "finish_reason": "stop",
+            "prompt_tokens": 3,
+        },
+    }
+    result = parse_generate_response(payload, 1)[0]
+    assert result.token_ids == (42, 43)
+    assert result.token_logprobs == (-0.5, -0.25)
+    assert result.finish_reason == "eos"
+    assert result.prompt_tokens == 3
+
+
+def test_sglang_logprob_response_parser_rejects_missing_logprobs():
+    with pytest.raises(ValueError, match="logprobs"):
+        parse_generate_response({"text": "42"}, 1)
