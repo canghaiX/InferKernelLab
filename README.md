@@ -133,6 +133,9 @@ scripts/run_sglang_gsm8k_rollout.sh
 当前 Qwen3 全量 BF16 logprob 预检尚未通过，未发布 GRPO 更新后的三 seed 收益结论。
 本地初始模型完整测试集 EM 为 677/1,319；实测边界见
 [`docs/gsm8k_validation.md`](docs/gsm8k_validation.md)。
+固定 token 的 SGLang/HF logprob 对照入口为
+`scripts/compare_grpo_logprobs.py`；本轮对照数据见
+[`docs/benchmark_results/gsm8k_logprob_alignment_diagnostic.json`](docs/benchmark_results/gsm8k_logprob_alignment_diagnostic.json)。
 SGLang rollout 的请求、logprob 和 fingerprint 约定见
 [`docs/sglang_gsm8k_rollout_design.md`](docs/sglang_gsm8k_rollout_design.md)。
 

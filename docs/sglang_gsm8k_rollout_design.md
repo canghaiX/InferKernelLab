@@ -62,3 +62,23 @@ masked, uninitialized cache slots can contain NaNs which SDPA can propagate
 through zero attention weights. The batched prefill path now zeroes invalid
 key/value positions; a ragged-prompt test fills unused cache with NaNs to
 verify the fix.
+
+## Logprob diagnosis
+
+`scripts/compare_grpo_logprobs.py` replays selected response positions as
+`prefix + target`, requests that target's candidate score through the SGLang
+0.5.18 sampler endpoint, and compares it with both the stored generation score
+and local HF teacher-forced score. `--preflight-json` selects the actual worst
+token from a failed MiniTrainBench report and verifies the rollout file digest.
+The one-step sampled token is diagnostic only; the requested candidate token is
+the scored target. The score retains the configured temperature and untruncated
+top-p 1 distribution.
+
+Measured rollout scores matched the same-server teacher-forced sampler exactly
+at 67 checked positions (64 sampled positions plus each seed's worst token).
+Rare tail-token SGLang/HF forward differences remained as high as 1.767 on the
+host HF/Torch stack and 0.724 when HF ran in the SGLang container. Same-container
+execution reduced the error but did not make all worst cases pass 0.5. This
+isolates the discrepancy to the SGLang/HF numerical forward path rather than
+stored rollout token alignment; the specific layer/operator cause remains open.
+The training-side gate continues to stop before optimizer updates.

@@ -18,6 +18,13 @@ class SGLangGeneration:
     prompt_tokens: int | None = None
 
 
+@dataclass(frozen=True)
+class SGLangTokenScore:
+    target_token_id: int
+    logprob: float
+    sampled_token_id: int
+
+
 def _logprob_entry(entry: Any) -> tuple[float, int | None]:
     if isinstance(entry, dict):
         value = entry.get("logprob", entry.get("log_prob"))
@@ -167,6 +174,87 @@ class SGLangClient:
         return parse_generate_response(
             payload, len(input_ids), require_logprobs=return_logprob
         )
+
+    def score_next_tokens(
+        self,
+        prefixes: Sequence[Sequence[int]],
+        target_token_ids: Sequence[int],
+        *,
+        temperature: float,
+        seeds: Sequence[int] | None = None,
+    ) -> tuple[SGLangTokenScore, ...]:
+        """Score one target token per prefix through SGLang's sampling path.
+
+        A throwaway token is sampled to exercise the same temperature-scaled
+        logits path as rollout. ``token_ids_logprob`` returns the requested
+        target token's score at that position, independent of the sampled ID.
+        """
+        if not prefixes or len(prefixes) != len(target_token_ids):
+            raise ValueError(
+                "prefixes and target_token_ids must have equal nonzero length"
+            )
+        if temperature <= 0 or not math.isfinite(temperature):
+            raise ValueError("temperature must be finite and positive")
+        if seeds is None:
+            seeds = range(len(prefixes))
+        if len(seeds) != len(prefixes):
+            raise ValueError("seeds must match prefixes")
+        payload = self._post(
+            "/generate",
+            {
+                "input_ids": [list(map(int, row)) for row in prefixes],
+                "sampling_params": [
+                    {
+                        "max_new_tokens": 1,
+                        "temperature": temperature,
+                        "top_p": 1.0,
+                        "top_k": -1,
+                        "n": 1,
+                        "sampling_seed": int(seed),
+                    }
+                    for seed in seeds
+                ],
+                "return_logprob": True,
+                "logprob_start_len": -1,
+                "token_ids_logprob": [[int(token)] for token in target_token_ids],
+                "return_text_in_logprobs": False,
+            },
+        )
+        items = payload if isinstance(payload, list) else [payload]
+        if len(items) != len(prefixes):
+            raise ValueError("SGLang score response count does not match input count")
+        scores = []
+        for item, target in zip(items, target_token_ids):
+            if not isinstance(item, dict):
+                raise TypeError("SGLang score response items must be JSON objects")
+            meta = item.get("meta_info", {})
+            if not isinstance(meta, dict):
+                raise TypeError("SGLang score response is missing meta_info")
+            raw_scores = meta.get("output_token_ids_logprobs")
+            if not isinstance(raw_scores, list) or not raw_scores:
+                raise ValueError(
+                    "SGLang score response is missing requested token scores"
+                )
+            position_scores = raw_scores[-1]
+            if not isinstance(position_scores, list):
+                raise TypeError("SGLang candidate token scores must be a list")
+            candidates = [_logprob_entry(entry) for entry in position_scores]
+            matches = [value for value, token in candidates if token == int(target)]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"SGLang score response did not return target token {target} exactly once"
+                )
+            raw_output_ids = item.get("output_ids", meta.get("output_token_ids"))
+            if not isinstance(raw_output_ids, list) or len(raw_output_ids) != 1:
+                raise ValueError("SGLang score request must sample exactly one token")
+            scores.append(
+                SGLangTokenScore(
+                    target_token_id=int(target),
+                    logprob=matches[0],
+                    sampled_token_id=int(raw_output_ids[0]),
+                )
+            )
+        return tuple(scores)
 
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
         request = urllib.request.Request(

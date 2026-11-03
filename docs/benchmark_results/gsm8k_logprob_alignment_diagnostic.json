@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "task": "grpo_logprob_alignment_diagnostic",
+  "date": "2026-11-03",
+  "model_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+  "sglang_server": {
+    "version": "0.5.18",
+    "dtype": "bfloat16",
+    "attention_backend": "fa3",
+    "sampling_backend": "pytorch",
+    "rl_on_policy_target": "fsdp"
+  },
+  "host_hf": {
+    "torch": "2.6.0+cu124",
+    "transformers": "4.57.6",
+    "dtype": "bfloat16",
+    "attention": "sdpa"
+  },
+  "container_hf": {
+    "torch": "2.13.0+cu130",
+    "transformers": "5.12.1",
+    "dtype": "bfloat16",
+    "attention": "sdpa"
+  },
+  "sampling_contract": {
+    "temperature": 0.8,
+    "top_p": 1.0,
+    "top_k": -1,
+    "logprob_start_len": -1,
+    "token_ids_logprob": "one requested candidate per prefix"
+  },
+  "sampled_positions": {
+    "rollout_vs_sglang_teacher_forced": {
+      "count": 64,
+      "max_abs_error": 0.0,
+      "mean_abs_error": 0.0,
+      "p99_abs_error": 0.0
+    },
+    "sglang_teacher_forced_vs_hf": {
+      "count": 64,
+      "max_abs_error": 0.08666640520095825,
+      "mean_abs_error": 0.00903079808601559,
+      "p99_abs_error": 0.07944042980670929
+    },
+    "rollout_vs_hf": {
+      "count": 64,
+      "max_abs_error": 0.08666640520095825,
+      "mean_abs_error": 0.00903079808601559,
+      "p99_abs_error": 0.07944042980670929
+    }
+  },
+  "rollout_vs_sglang_teacher_forced": {
+    "max_abs_error_across_64_sampled_plus_3_worst_positions": 0.0,
+    "positions": 67
+  },
+  "per_seed_worst_cases": [
+    {
+      "rollout_seed": 2026,
+      "preflight": {
+        "baseline_ratio_outside_0_8_1_2_fraction": 0.0040544308722019196,
+        "max_abs_error": 0.6526312828063965,
+        "mean_abs_error": 0.011140523478388786,
+        "p99_abs_error": 0.15566594898700714,
+        "passed": false,
+        "token_count": 422994,
+        "tolerance": 0.5,
+        "worst": {
+          "abs_error": 0.6526312828063965,
+          "completion": 1,
+          "current_logprob": -4.0588812828063965,
+          "group_id": "train-907",
+          "old_logprob": -3.40625,
+          "response_position": 165
+        }
+      },
+      "fixed_case_host_hf": {
+        "group_id": "train-907",
+        "completion": 1,
+        "response_position": 165,
+        "target_token_id": 151645,
+        "is_eos": true,
+        "rollout_logprob": -3.40625,
+        "hf_logprob": -3.6018052101135254,
+        "sglang_teacher_forced_logprob": -3.40625,
+        "sglang_sampled_token_id": 25521,
+        "rollout_vs_sglang_abs_error": 0.0,
+        "sglang_vs_hf_abs_error": 0.1955552101135254,
+        "rollout_vs_hf_abs_error": 0.1955552101135254
+      },
+      "fixed_case_same_sglang_teacher_forced": -3.40625,
+      "same_container_hf_case": null
+    },
+    {
+      "rollout_seed": 2027,
+      "preflight": {
+        "baseline_ratio_outside_0_8_1_2_fraction": 0.003847995772957802,
+        "max_abs_error": 1.254300832748413,
+        "mean_abs_error": 0.011157358065247536,
+        "p99_abs_error": 0.15428851544857025,
+        "passed": false,
+        "token_count": 419699,
+        "tolerance": 0.5,
+        "worst": {
+          "abs_error": 1.254300832748413,
+          "completion": 7,
+          "current_logprob": -1.758207082748413,
+          "group_id": "train-1499",
+          "old_logprob": -0.50390625,
+          "response_position": 116
+        }
+      },
+      "fixed_case_host_hf": {
+        "group_id": "train-1499",
+        "completion": 7,
+        "response_position": 116,
+        "target_token_id": 20,
+        "is_eos": false,
+        "rollout_logprob": -0.50390625,
+        "hf_logprob": -1.5906784534454346,
+        "sglang_teacher_forced_logprob": -0.50390625,
+        "sglang_sampled_token_id": 20,
+        "rollout_vs_sglang_abs_error": 0.0,
+        "sglang_vs_hf_abs_error": 1.0867722034454346,
+        "rollout_vs_hf_abs_error": 1.0867722034454346
+      },
+      "fixed_case_same_sglang_teacher_forced": -0.50390625,
+      "same_container_hf_case": {
+        "group_id": "train-1499",
+        "completion": 7,
+        "response_position": 116,
+        "target_token_id": 20,
+        "is_eos": false,
+        "rollout_logprob": -0.50390625,
+        "hf_logprob": -1.0502121448516846,
+        "sglang_teacher_forced_logprob": -0.50390625,
+        "sglang_sampled_token_id": 20,
+        "rollout_vs_sglang_abs_error": 0.0,
+        "sglang_vs_hf_abs_error": 0.5463058948516846,
+        "rollout_vs_hf_abs_error": 0.5463058948516846
+      }
+    },
+    {
+      "rollout_seed": 2028,
+      "preflight": {
+        "baseline_ratio_outside_0_8_1_2_fraction": 0.0038914440665394068,
+        "max_abs_error": 0.8115859031677246,
+        "mean_abs_error": 0.01112332008779049,
+        "p99_abs_error": 0.15399207174777985,
+        "passed": false,
+        "token_count": 425292,
+        "tolerance": 0.5,
+        "worst": {
+          "abs_error": 0.8115859031677246,
+          "completion": 6,
+          "current_logprob": -4.905335903167725,
+          "group_id": "train-3487",
+          "old_logprob": -4.09375,
+          "response_position": 111
+        }
+      },
+      "fixed_case_host_hf": {
+        "group_id": "train-3487",
+        "completion": 6,
+        "response_position": 111,
+        "target_token_id": 21,
+        "is_eos": false,
+        "rollout_logprob": -4.09375,
+        "hf_logprob": -5.860982894897461,
+        "sglang_teacher_forced_logprob": -4.09375,
+        "sglang_sampled_token_id": 13,
+        "rollout_vs_sglang_abs_error": 0.0,
+        "sglang_vs_hf_abs_error": 1.767232894897461,
+        "rollout_vs_hf_abs_error": 1.767232894897461
+      },
+      "fixed_case_same_sglang_teacher_forced": -4.09375,
+      "same_container_hf_case": {
+        "group_id": "train-3487",
+        "completion": 6,
+        "response_position": 111,
+        "target_token_id": 21,
+        "is_eos": false,
+        "rollout_logprob": -4.09375,
+        "hf_logprob": -4.8174872398376465,
+        "sglang_teacher_forced_logprob": -4.09375,
+        "sglang_sampled_token_id": 13,
+        "rollout_vs_sglang_abs_error": 0.0,
+        "sglang_vs_hf_abs_error": 0.7237372398376465,
+        "rollout_vs_hf_abs_error": 0.7237372398376465
+      }
+    }
+  ],
+  "conclusion": "The stored rollout logprob matches SGLang teacher-forced sampler scores at tested positions. HF scores differ at rare tail tokens; running HF in the SGLang container reduces but does not eliminate the largest observed errors. Exact model-layer cause remains unresolved; max_abs_error gate 0.5 remains failed.",
+  "training_started": false,
+  "optimizer_updated": false
+}
