@@ -83,6 +83,84 @@ def _hf_scores(
     return [float(value) for value in scores.cpu()]
 
 
+def _hf_group_batch_scores(
+    model,
+    group: dict[str, Any],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    temperature: float,
+    pad_token_id: int = 0,
+) -> list[list[float]]:
+    """Mirror MiniTrainBench's right-padded, per-prompt completion batch."""
+    prompt = [int(token) for token in group["prompt_tokens"]]
+    responses = [
+        [int(token) for token in completion["response_tokens"]]
+        for completion in group["completions"]
+    ]
+    sequences = [prompt + response for response in responses]
+    width = max(map(len, sequences))
+    input_ids = torch.full(
+        (len(sequences), width), pad_token_id, dtype=torch.long, device=device
+    )
+    attention_mask = torch.zeros_like(input_ids)
+    for row, sequence in enumerate(sequences):
+        input_ids[row, : len(sequence)] = torch.tensor(
+            sequence, dtype=torch.long, device=device
+        )
+        attention_mask[row, : len(sequence)] = 1
+    with (
+        torch.no_grad(),
+        torch.autocast(
+            device_type=device.type, dtype=dtype, enabled=dtype != torch.float32
+        ),
+    ):
+        logits = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        ).logits
+    scores = []
+    for row, response in enumerate(responses):
+        start = len(prompt) - 1
+        labels = input_ids[row, len(prompt) : len(prompt) + len(response)]
+        response_logits = logits[row, start : start + len(response)].float()
+        values = torch.log_softmax(response_logits / temperature, dim=-1).gather(
+            -1, labels.unsqueeze(-1)
+        )
+        scores.append([float(value) for value in values.squeeze(-1).cpu()])
+    return scores
+
+
+def _hf_next_token_score(
+    model,
+    input_ids: list[int],
+    target_token_id: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    temperature: float,
+) -> tuple[float, list[float]]:
+    ids = torch.tensor([input_ids], dtype=torch.long, device=device)
+    with (
+        torch.no_grad(),
+        torch.autocast(
+            device_type=device.type, dtype=dtype, enabled=dtype != torch.float32
+        ),
+    ):
+        output = model(
+            input_ids=ids,
+            attention_mask=torch.ones_like(ids),
+            use_cache=False,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+    logits = output.logits[0, -1].float() / temperature
+    score = float(torch.log_softmax(logits, dim=-1)[target_token_id])
+    hidden = output.hidden_states[-1][0, -1].float().cpu().tolist()
+    return score, hidden
+
+
 def _stats(values: list[float]) -> dict[str, float | int | None]:
     return {
         "count": len(values),
@@ -119,6 +197,27 @@ def main() -> None:
         "--attention-implementation", choices=("eager", "sdpa"), default="sdpa"
     )
     parser.add_argument("--tolerance", type=float, default=0.5)
+    parser.add_argument(
+        "--prefix-forward-diagnostic",
+        action="store_true",
+        help="compare full-sequence teacher forcing with one-prefix forward per selected token",
+    )
+    parser.add_argument(
+        "--trainer-batch-diagnostic",
+        action="store_true",
+        help="also score each prompt's completions in the exact padded HF batch shape used by MiniTrainBench",
+    )
+    parser.add_argument(
+        "--capture-final-hidden-states",
+        action="store_true",
+        help="request final-token hidden vectors (server must use --return-hidden-states-mode full)",
+    )
+    parser.add_argument(
+        "--repeat-sglang-scores",
+        type=int,
+        default=1,
+        help="repeat the same SGLang score request to measure score stability",
+    )
     args = parser.parse_args()
     if (
         min(
@@ -131,6 +230,10 @@ def main() -> None:
         parser.error("completion, position, and score batch limits must be positive")
     if not math.isfinite(args.tolerance) or args.tolerance <= 0:
         parser.error("tolerance must be finite and positive")
+    if args.repeat_sglang_scores <= 0:
+        parser.error("repeat-sglang-scores must be positive")
+    if args.prefix_forward_diagnostic and not args.capture_final_hidden_states:
+        parser.error("prefix-forward-diagnostic requires --capture-final-hidden-states")
 
     manifest, groups = _read_rollout(args.rollouts)
     if manifest.get("engine") != "sglang":
@@ -188,7 +291,17 @@ def main() -> None:
         )
     selected, requested_cases = _select_completions(groups, args)
     prefixes, targets, rows = [], [], []
+    trainer_batch_scores: dict[str, list[list[float]]] = {}
     for group, completion_index, completion in selected:
+        group_id = str(group["group_id"])
+        if args.trainer_batch_diagnostic and group_id not in trainer_batch_scores:
+            trainer_batch_scores[group_id] = _hf_group_batch_scores(
+                model,
+                group,
+                device=device,
+                dtype=dtype,
+                temperature=temperature,
+            )
         prompt = [int(token) for token in group["prompt_tokens"]]
         response = [int(token) for token in completion["response_tokens"]]
         hf = _hf_scores(
@@ -229,7 +342,8 @@ def main() -> None:
         for position in positions:
             if position < 0 or position >= len(response):
                 raise ValueError("case response_position is out of range")
-            prefixes.append(prompt + response[:position])
+            prefix = prompt + response[:position]
+            prefixes.append(prefix)
             targets.append(response[position])
             rows.append(
                 {
@@ -241,6 +355,13 @@ def main() -> None:
                     in manifest["generation"]["eos_token_ids"],
                     "rollout_logprob": float(completion["old_logprobs"][position]),
                     "hf_logprob": hf[position],
+                    "hf_trainer_batch_logprob": (
+                        trainer_batch_scores[group_id][completion_index][position]
+                        if args.trainer_batch_diagnostic
+                        else None
+                    ),
+                    "hf_prefix_logprob": None,
+                    "hf_final_hidden": None,
                 }
             )
 
@@ -253,14 +374,64 @@ def main() -> None:
                 targets[start:end],
                 temperature=temperature,
                 seeds=range(start, end),
+                return_hidden_states=args.capture_final_hidden_states,
             )
         )
-    for row, score in zip(rows, scores):
+    group_by_id = {str(group["group_id"]): group for group in groups}
+    for row_index, (row, score) in enumerate(zip(rows, scores)):
         row["sglang_teacher_forced_logprob"] = score.logprob
         row["sglang_sampled_token_id"] = score.sampled_token_id
+        row["sglang_final_hidden"] = score.hidden_state
+        if args.prefix_forward_diagnostic:
+            if score.hidden_state is None:
+                raise ValueError("SGLang server did not return final hidden state")
+            group = group_by_id[row["group_id"]]
+            response = group["completions"][row["completion"]]["response_tokens"]
+            prefix = [int(token) for token in group["prompt_tokens"]] + [
+                int(token) for token in response[: row["response_position"]]
+            ]
+            prefix_score, prefix_hidden = _hf_next_token_score(
+                model,
+                prefix,
+                row["target_token_id"],
+                device=device,
+                dtype=dtype,
+                temperature=temperature,
+            )
+            row["hf_prefix_logprob"] = prefix_score
+            row["hf_final_hidden"] = prefix_hidden
+            row["sglang_vs_hf_final_hidden_max_abs_error"] = float(
+                (torch.tensor(score.hidden_state) - torch.tensor(prefix_hidden))
+                .abs()
+                .max()
+            )
+            row["full_vs_prefix_hf_logprob_abs_error"] = abs(
+                row["hf_logprob"] - prefix_score
+            )
         row["rollout_vs_sglang_abs_error"] = abs(row["rollout_logprob"] - score.logprob)
         row["sglang_vs_hf_abs_error"] = abs(score.logprob - row["hf_logprob"])
         row["rollout_vs_hf_abs_error"] = abs(row["rollout_logprob"] - row["hf_logprob"])
+        if args.trainer_batch_diagnostic:
+            row["sglang_vs_hf_trainer_batch_abs_error"] = abs(
+                score.logprob - row["hf_trainer_batch_logprob"]
+            )
+            row["hf_single_vs_trainer_batch_abs_error"] = abs(
+                row["hf_logprob"] - row["hf_trainer_batch_logprob"]
+            )
+        if args.repeat_sglang_scores > 1:
+            repeated = []
+            for repeat in range(args.repeat_sglang_scores - 1):
+                repeated.append(
+                    client.score_next_tokens(
+                        [prefixes[row_index]],
+                        [row["target_token_id"]],
+                        temperature=temperature,
+                        seeds=[repeat],
+                    )[0].logprob
+                )
+            repeated.append(score.logprob)
+            row["sglang_repeat_logprobs"] = repeated
+            row["sglang_repeat_range"] = max(repeated) - min(repeated)
 
     result = {
         "schema_version": 1,
@@ -281,6 +452,10 @@ def main() -> None:
         },
         "sampling_logprob_contract": manifest["logprob_convention"],
         "position_count": len(rows),
+        "prefix_forward_diagnostic": args.prefix_forward_diagnostic,
+        "trainer_batch_diagnostic": args.trainer_batch_diagnostic,
+        "capture_final_hidden_states": args.capture_final_hidden_states,
+        "repeat_sglang_scores": args.repeat_sglang_scores,
         "tolerance": args.tolerance,
         "comparisons": {
             "rollout_vs_sglang_teacher_forced": _stats(
@@ -290,6 +465,18 @@ def main() -> None:
                 [r["sglang_vs_hf_abs_error"] for r in rows]
             ),
             "rollout_vs_hf": _stats([r["rollout_vs_hf_abs_error"] for r in rows]),
+            **(
+                {
+                    "sglang_vs_hf_trainer_batch": _stats(
+                        [r["sglang_vs_hf_trainer_batch_abs_error"] for r in rows]
+                    ),
+                    "hf_single_vs_trainer_batch": _stats(
+                        [r["hf_single_vs_trainer_batch_abs_error"] for r in rows]
+                    ),
+                }
+                if args.trainer_batch_diagnostic
+                else {}
+            ),
         },
         "worst_rollout_vs_sglang": max(
             rows, key=lambda r: r["rollout_vs_sglang_abs_error"], default=None

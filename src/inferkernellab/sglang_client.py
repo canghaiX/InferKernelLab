@@ -23,6 +23,7 @@ class SGLangTokenScore:
     target_token_id: int
     logprob: float
     sampled_token_id: int
+    hidden_state: tuple[float, ...] | None = None
 
 
 def _logprob_entry(entry: Any) -> tuple[float, int | None]:
@@ -182,6 +183,7 @@ class SGLangClient:
         *,
         temperature: float,
         seeds: Sequence[int] | None = None,
+        return_hidden_states: bool = False,
     ) -> tuple[SGLangTokenScore, ...]:
         """Score one target token per prefix through SGLang's sampling path.
 
@@ -218,6 +220,7 @@ class SGLangClient:
                 "logprob_start_len": -1,
                 "token_ids_logprob": [[int(token)] for token in target_token_ids],
                 "return_text_in_logprobs": False,
+                "return_hidden_states": return_hidden_states,
             },
         )
         items = payload if isinstance(payload, list) else [payload]
@@ -247,11 +250,32 @@ class SGLangClient:
             raw_output_ids = item.get("output_ids", meta.get("output_token_ids"))
             if not isinstance(raw_output_ids, list) or len(raw_output_ids) != 1:
                 raise ValueError("SGLang score request must sample exactly one token")
+            hidden_state = None
+            if return_hidden_states:
+                raw_hidden = meta.get("hidden_states")
+                if not isinstance(raw_hidden, list) or not raw_hidden:
+                    raise ValueError(
+                        "SGLang response is missing requested hidden states"
+                    )
+                last_hidden = raw_hidden[-1]
+                if not isinstance(last_hidden, list) or not last_hidden:
+                    raise ValueError("SGLang returned an empty final hidden state")
+                vector = last_hidden[-1]
+                if not isinstance(vector, list) or not vector:
+                    raise ValueError(
+                        "SGLang final hidden state must be a nonempty vector"
+                    )
+                hidden_state = tuple(float(value) for value in vector)
+                if not all(math.isfinite(value) for value in hidden_state):
+                    raise ValueError(
+                        "SGLang final hidden state contains non-finite values"
+                    )
             scores.append(
                 SGLangTokenScore(
                     target_token_id=int(target),
                     logprob=matches[0],
                     sampled_token_id=int(raw_output_ids[0]),
+                    hidden_state=hidden_state,
                 )
             )
         return tuple(scores)

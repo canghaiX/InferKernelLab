@@ -190,6 +190,45 @@ def test_teacher_forced_candidate_score_uses_sampling_endpoint():
     assert received[0]["token_ids_logprob"] == [[7], [8]]
 
 
+def test_teacher_forced_score_can_return_final_hidden_state():
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert request["return_hidden_states"] is True
+            body = json.dumps(
+                {
+                    "output_ids": [99],
+                    "meta_info": {
+                        "output_token_ids_logprobs": [[[-0.25, 7, None]]],
+                        "hidden_states": [[[1.0, -2.0, 3.5]]],
+                    },
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        score = SGLangClient(
+            f"http://127.0.0.1:{server.server_port}"
+        ).score_next_tokens([[1, 2]], [7], temperature=0.8, return_hidden_states=True)[
+            0
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert score.logprob == -0.25
+    assert score.hidden_state == (1.0, -2.0, 3.5)
+
+
 def test_teacher_forced_candidate_score_rejects_target_mismatch():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):

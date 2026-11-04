@@ -33,6 +33,10 @@ synthetic decoder 保留固定权重闭环；可选 Transformers adapter 进一�
 - 支持显式 `--engine sglang` 的本地 Qwen3/GSM8K rollout：批量提交 token IDs 到固定版本
   SGLang native `/generate`，保留 completion logprob、数值 exact-match reward、数据与
   模型指纹；不会隐式下载模型。
+- 支持显式 `--engine hf_reference` 的本地 Qwen3 correctness rollout：单条 completion
+  逐 token 使用 Transformers DynamicCache，记录采样时温度化 policy logprob；artifact 记录
+  PyTorch/Transformers 版本、精度、autocast、attention backend 和前向契约。该 serial 路径
+  优先验证概率一致性，不作为高吞吐 serving 实现。
 - runtime 支持 `prefill_fn`、`prefill_batch_fn` 和 `decode_fn` hook，保留原有无模型
   `step()` 接口；批量 hook 未提供时自动回退到逐请求 callback。
 - benchmark 输出各路径的误差、P50/P95、环境信息和形状级相对性能。
@@ -130,12 +134,37 @@ DATA_MANIFEST=/path/to/gsm8k/manifest.json \
 scripts/run_sglang_gsm8k_rollout.sh
 ```
 
-当前 Qwen3 全量 BF16 logprob 预检尚未通过，未发布 GRPO 更新后的三 seed 收益结论。
+生成供 MiniTrainBench 使用的 HF Qwen3 reference rollout 时使用本地 checkpoint；该路径
+要求 `top_p=1.0`，并与 trainer 共享版本和增量 cache 前向契约：
+
+```bash
+PYTHONPATH=src python3 -m inferkernellab.rollout \
+  --engine hf_reference --model-source path \
+  --model-path /data/models/Qwen/Qwen3-0.6B \
+  --tokenizer-path /data/models/Qwen/Qwen3-0.6B \
+  --prompts /path/to/gsm8k/train.jsonl \
+  --data-manifest /path/to/gsm8k/manifest.json \
+  --output /tmp/gsm8k-hf-rollout.jsonl \
+  --device cuda --dtype bfloat16 --attention-implementation sdpa \
+  --num-generations 8 --max-new-tokens 256 --temperature 0.8 --top-p 1.0
+```
+
+历史 Qwen3/SGLang rollout 的全量 BF16 logprob 预检未通过；当前另行执行 HF reference 单 seed 实验，未发布正式更新后的收益结论。
+HF reference 路径的 A100 8 题 × 8 completion smoke preflight 覆盖 11,332 个生成 token，
+max logprob error 为 0.0；MiniTrainBench 随后完成双卡更新和 step-2 DCP 恢复。本轮已验证证据、
+当前验收状态与复现入口见 MiniTrainBench 的 `docs/gsm8k_single_seed_run.md`；
+该探索实验不代表多 seed 稳定性或标准 GSM8K benchmark 提升。
 本地初始模型完整测试集 EM 为 677/1,319；实测边界见
 [`docs/gsm8k_validation.md`](docs/gsm8k_validation.md)。
 固定 token 的 SGLang/HF logprob 对照入口为
 `scripts/compare_grpo_logprobs.py`；本轮对照数据见
 [`docs/benchmark_results/gsm8k_logprob_alignment_diagnostic.json`](docs/benchmark_results/gsm8k_logprob_alignment_diagnostic.json)。
+可通过 `--capture-final-hidden-states --prefix-forward-diagnostic
+--repeat-sglang-scores 3` 检查最终状态、前缀与全序列数值差异；SGLang
+HTTP 接口只暴露最终状态。需要层级数据时，可给 server 配置诊断 `forward_hooks`
+并运行 `scripts/capture_sglang_layer_probe.py`。
+Hook-based 层级对照结果见
+[`docs/benchmark_results/qwen3_layerwise_logprob_diagnostic.json`](docs/benchmark_results/qwen3_layerwise_logprob_diagnostic.json)：三个最差样本的首次显著 block 分叉分别在第 15、17、7 层，尚无单一固定根因。
 SGLang rollout 的请求、logprob 和 fingerprint 约定见
 [`docs/sglang_gsm8k_rollout_design.md`](docs/sglang_gsm8k_rollout_design.md)。
 

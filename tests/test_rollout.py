@@ -1,5 +1,6 @@
 import json
 from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -8,7 +9,7 @@ pytest.importorskip("transformers")
 
 from inferkernellab.gsm8k import extract_gsm8k_answer, gsm8k_exact_match
 from inferkernellab.hf_benchmark import LlamaPagedDecodeRunner, _load_model
-from inferkernellab.rollout import run
+from inferkernellab.rollout import _hf_incremental_generate, run
 from inferkernellab.sglang_client import parse_generate_response
 
 
@@ -70,6 +71,98 @@ def test_rollout_writes_grouped_logprobs_and_model_fingerprints(tmp_path):
         for completion in group["completions"]:
             assert len(completion["response_tokens"]) == len(completion["old_logprobs"])
             assert completion["finish_reason"] in {"eos", "length"}
+
+
+def test_hf_reference_qwen3_rollout_is_seeded_and_records_contract(
+    tmp_path, monkeypatch
+):
+    transformers = pytest.importorskip("transformers")
+    model_path = tmp_path / "qwen3"
+    config = transformers.Qwen3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=16,
+        eos_token_id=31,
+        attention_dropout=0.0,
+    )
+    transformers.Qwen3ForCausalLM(config).save_pretrained(model_path)
+
+    class Tokenizer:
+        def decode(self, tokens, skip_special_tokens=True):
+            return " ".join(map(str, tokens))
+
+    monkeypatch.setattr("inferkernellab.rollout._load_tokenizer", lambda _: Tokenizer())
+    args = _rollout_args(tmp_path)
+    args.engine = "hf_reference"
+    args.model_source = "path"
+    args.model_path = str(model_path)
+    args.export_model_path = None
+    args.tokenizer_path = str(model_path)
+    args.data_manifest = None
+    args.attention_implementation = "sdpa"
+    args.top_p = 1.0
+    args.max_new_tokens = 3
+
+    first_path = tmp_path / "hf-first.jsonl"
+    args.output = str(first_path)
+    manifest = run(args)
+    first_records = [json.loads(line) for line in first_path.read_text().splitlines()]
+    second_path = tmp_path / "hf-second.jsonl"
+    args.output = str(second_path)
+    run(args)
+    second_records = [json.loads(line) for line in second_path.read_text().splitlines()]
+
+    assert manifest["engine"] == "hf_reference"
+    assert manifest["forward_contract"]["name"] == "qwen3_hf_incremental_cache_v1"
+    assert manifest["forward_contract"]["weights_dtype"] == "float32"
+    assert manifest["forward_contract"]["attention_implementation"] == "sdpa"
+    assert manifest["cache_released"]
+    assert [row["completions"] for row in first_records[1:]] == [
+        row["completions"] for row in second_records[1:]
+    ]
+    for group in first_records[1:]:
+        for completion in group["completions"]:
+            assert len(completion["response_tokens"]) == len(completion["old_logprobs"])
+            assert completion["finish_reason"] in {"eos", "length"}
+
+
+def test_hf_reference_generation_keeps_eos_and_its_logprob():
+    class EosModel(torch.nn.Module):
+        def forward(self, input_ids, **kwargs):
+            logits = torch.tensor([[-10.0, 10.0]], device=input_ids.device)
+            return SimpleNamespace(logits=logits[:, None, :], past_key_values=None)
+
+    generator = torch.Generator(device="cpu").manual_seed(5)
+    tokens, logprobs, finish_reason = _hf_incremental_generate(
+        EosModel(),
+        (1,),
+        max_new_tokens=4,
+        temperature=0.8,
+        eos_token_ids=(1,),
+        generator=generator,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert tokens == [1]
+    assert len(logprobs) == 1
+    assert logprobs[0] == pytest.approx(0.0)
+    assert finish_reason == "eos"
+
+
+def test_hf_reference_rejects_truncated_policy(tmp_path):
+    args = _rollout_args(tmp_path)
+    args.engine = "hf_reference"
+    args.model_source = "path"
+    args.model_path = "/not/loaded/because/top-p-is-invalid"
+    args.top_p = 0.9
+
+    with pytest.raises(ValueError, match="top_p=1.0"):
+        run(args)
 
 
 def test_runner_stops_on_eos_and_releases_blocks(tmp_path):

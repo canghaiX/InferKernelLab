@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "task": "qwen3_sglang_hf_layerwise_logprob_diagnostic",
+  "date": "2026-11-03",
+  "model_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+  "sglang": {
+    "version": "0.5.18",
+    "container_image_id": "sha256:5a9ac549c12104c2b8757b28785c92a8710076f0a71f77ca8e18e1dd264d06d5",
+    "attention_backend": "fa3",
+    "deterministic_inference": true,
+    "dtype": "bfloat16",
+    "rl_on_policy_target": "fsdp"
+  },
+  "hf": {
+    "torch": "2.6.0+cu124",
+    "transformers": "4.57.6",
+    "attention_implementation": "sdpa",
+    "autocast_dtype": "bfloat16",
+    "weights_dtype": "float32"
+  },
+  "capture": {
+    "token_position": "last input token before the scored response token",
+    "stages": ["input_norm", "attention", "post_attention_norm", "gate_proj", "up_proj", "down_proj", "mlp", "block"],
+    "stage_vectors_per_case": 224,
+    "block_output_definition": "SGLang hidden stream plus FP32 residual stream"
+  },
+  "source": {
+    "inferkernellab_parent_commit": "ff164597a689baa0802d2dc21b706d68af1792ea",
+    "mini_train_bench_commit": "4ade509b5f0d5213ea625da2cd46c71d7e374337",
+    "capture_script_sha256": "360dd29e01620071da7d687bb218772e80aa551fc2063c5285b4431114a65e28",
+    "sglang_hook_sha256": "cf0c713b8dec691edfb29f317b91149813a843fcad36fc5d292ec61dfafc129c"
+  },
+  "cases": [
+    {
+      "rollout_seed": 2026,
+      "group_id": "train-907",
+      "completion": 1,
+      "response_position": 165,
+      "target_token_id": 151645,
+      "rollout_logprob": -3.40625,
+      "sglang_logprob": -3.40625,
+      "hf_prefix_logprob": -3.6018052101135254,
+      "logprob_abs_error": 0.1955552101135254,
+      "first_block_max_abs_error_over_0_1": "layer015_block",
+      "first_attention_max_abs_error_over_0_1": "layer019_attention",
+      "first_mlp_projection_max_abs_error_over_0_1": "layer011_down_proj",
+      "early_layer_max_abs_errors": {"layer000_attention": 0.0009765625, "layer000_block": 0.001953125, "layer000_gate_proj": 0.015625, "layer000_up_proj": 0.00390625, "layer000_down_proj": 0.001953125},
+      "late_layer_max_abs_errors": {"layer027_attention": 0.359375, "layer027_block": 1.66357421875}
+    },
+    {
+      "rollout_seed": 2027,
+      "group_id": "train-1499",
+      "completion": 7,
+      "response_position": 116,
+      "target_token_id": 20,
+      "rollout_logprob": -0.50390625,
+      "sglang_logprob": -0.50390625,
+      "hf_prefix_logprob": -0.9983704090118408,
+      "logprob_abs_error": 0.4944641590118408,
+      "first_block_max_abs_error_over_0_1": "layer017_block",
+      "first_attention_max_abs_error_over_0_1": "layer017_attention",
+      "first_mlp_projection_max_abs_error_over_0_1": "layer016_down_proj",
+      "early_layer_max_abs_errors": {"layer000_attention": 0.0009765625, "layer000_block": 0.0009765625, "layer000_gate_proj": 0.015625, "layer000_up_proj": 0.00390625, "layer000_down_proj": 0.0009765625},
+      "late_layer_max_abs_errors": {"layer027_attention": 0.625, "layer027_block": 1.3957977294921875}
+    },
+    {
+      "rollout_seed": 2028,
+      "group_id": "train-3487",
+      "completion": 6,
+      "response_position": 111,
+      "target_token_id": 21,
+      "rollout_logprob": -4.09375,
+      "sglang_logprob": -4.09375,
+      "hf_prefix_logprob": -5.086873531341553,
+      "logprob_abs_error": 0.9931235313415527,
+      "first_block_max_abs_error_over_0_1": "layer007_block",
+      "first_attention_max_abs_error_over_0_1": "layer018_attention",
+      "first_mlp_projection_max_abs_error_over_0_1": "layer007_down_proj",
+      "early_layer_max_abs_errors": {"layer000_attention": 0.0009765625, "layer000_block": 0.00390625, "layer000_gate_proj": 0.015625, "layer000_up_proj": 0.0078125, "layer000_down_proj": 0.00390625},
+      "late_layer_max_abs_errors": {"layer027_attention": 0.28125, "layer027_block": 1.4146728515625}
+    }
+  ],
+  "conclusion": "The first significant block divergence occurs at different depths across samples (layers 15, 17, and 7). Early module outputs are close and errors grow with depth. This indicates accumulated numerical-path divergence, not one fixed offending layer. The exact primitive-level cause remains unresolved.",
+  "acceptance": {"max_abs_logprob_tolerance": 0.5, "all_cases_pass": false, "formal_grpo_updates_started": false},
+  "limitations": ["Hook-observed module outputs are diagnostic evidence, not an operator-by-operator proof of causality.", "SGLang and HF block outputs use different residual representations; captured SGLang block output sums its hidden and FP32 residual streams.", "The diagnostic compares the final input token state used to score the target token."]
+}

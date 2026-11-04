@@ -334,6 +334,285 @@ def _run_sglang(args: argparse.Namespace) -> dict[str, Any]:
     return _write_manifest(args.output, manifest, groups)
 
 
+def _hf_incremental_generate(
+    model: torch.nn.Module,
+    prompt: tuple[int, ...],
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    eos_token_ids: tuple[int, ...],
+    generator: torch.Generator,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[list[int], list[float], str]:
+    prompt_ids = torch.tensor([prompt], dtype=torch.long, device=device)
+    attention_mask = torch.ones_like(prompt_ids)
+    response: list[int] = []
+    logprobs: list[float] = []
+    eos = set(eos_token_ids)
+
+    with (
+        torch.inference_mode(),
+        torch.autocast(
+            device_type=device.type, dtype=dtype, enabled=dtype != torch.float32
+        ),
+    ):
+        output = model(
+            input_ids=prompt_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            return_dict=True,
+        )
+        logits = output.logits[:, -1].float()
+        cache = output.past_key_values
+        for index in range(max_new_tokens):
+            policy_logprobs = torch.log_softmax(logits / temperature, dim=-1)
+            token = int(
+                torch.multinomial(
+                    policy_logprobs.exp(), num_samples=1, generator=generator
+                ).item()
+            )
+            response.append(token)
+            logprobs.append(float(policy_logprobs[0, token]))
+            if token in eos:
+                finish_reason = "eos"
+                break
+            if index + 1 < max_new_tokens:
+                prompt_ids = torch.tensor([[token]], dtype=torch.long, device=device)
+                attention_mask = torch.ones(
+                    (1, len(prompt) + index + 1), dtype=torch.long, device=device
+                )
+                output = model(
+                    input_ids=prompt_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=cache,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                logits = output.logits[:, -1].float()
+                cache = output.past_key_values
+        else:
+            finish_reason = "length"
+    return response, logprobs, finish_reason
+
+
+def _run_hf_reference(args: argparse.Namespace) -> dict[str, Any]:
+    if args.model_source != "path" or not args.model_path:
+        raise ValueError("HF reference rollout requires a local --model-path")
+    if args.max_new_tokens <= 0:
+        raise ValueError("HF reference rollout requires max_new_tokens > 0")
+    if args.top_p != 1.0:
+        raise ValueError("HF reference GRPO rollout requires top_p=1.0")
+    try:
+        import transformers
+        from transformers import AutoConfig, AutoModelForCausalLM
+    except ImportError as error:
+        raise RuntimeError(
+            "HF reference rollout requires the optional Transformers dependency"
+        ) from error
+
+    model_path = Path(args.model_path)
+    config = AutoConfig.from_pretrained(model_path, local_files_only=True)
+    if config.model_type != "qwen3":
+        raise ValueError(
+            "HF reference rollout currently supports Qwen3 checkpoints only"
+        )
+    tokenizer_path = args.tokenizer_path or args.model_path
+    tokenizer = _load_tokenizer(tokenizer_path)
+    rows = _load_prompt_rows(Path(args.prompts))
+    is_gsm8k = all("question" in row and "answer" in row for row in rows)
+    if is_gsm8k and not args.data_manifest:
+        raise ValueError("GSM8K rollout requires --data-manifest from prepare_gsm8k.py")
+    if args.data_manifest:
+        json.loads(Path(args.data_manifest).read_text())
+    prompts, targets, prompt_texts, target_texts = _encode_prompts(
+        rows, tokenizer=tokenizer, vocab_size=int(config.vocab_size)
+    )
+    if max(map(len, prompts)) + args.max_new_tokens > int(
+        config.max_position_embeddings
+    ):
+        raise ValueError("prompt plus generation length exceeds model position limit")
+
+    device = _resolve_device(args.device)
+    dtype = _dtype(args.dtype)
+    config._attn_implementation = args.attention_implementation
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            model_path,
+            config=config,
+            local_files_only=True,
+            dtype=torch.float32,
+            attn_implementation=args.attention_implementation,
+        )
+        .to(device)
+        .eval()
+    )
+    generation_config = None
+    try:
+        from transformers import GenerationConfig
+
+        generation_config = GenerationConfig.from_pretrained(
+            model_path, local_files_only=True
+        )
+    except (OSError, TypeError, ValueError):
+        pass
+    eos_value = (
+        generation_config.eos_token_id
+        if generation_config is not None and generation_config.eos_token_id is not None
+        else config.eos_token_id
+    )
+    eos_token_ids = tuple(
+        int(token)
+        for token in (eos_value if isinstance(eos_value, list) else [eos_value])
+        if token is not None
+    )
+    seeds = _request_sampling_seeds(args.seed, len(prompts) * args.num_generations)
+    groups = []
+    generated_tokens = 0
+    started = time.perf_counter()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    for group_index, (prompt, target) in enumerate(zip(prompts, targets, strict=True)):
+        completions = []
+        for offset in range(args.num_generations):
+            flat_index = group_index * args.num_generations + offset
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seeds[flat_index])
+            response, old_logprobs, finish_reason = _hf_incremental_generate(
+                model,
+                prompt,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                eos_token_ids=eos_token_ids,
+                generator=generator,
+                device=device,
+                dtype=dtype,
+            )
+            response_text = tokenizer.decode(response, skip_special_tokens=True)
+            reward = (
+                gsm8k_exact_match(response_text, target_texts[group_index] or "")
+                if is_gsm8k
+                else _prefix_accuracy(tuple(response), target)
+            )
+            completions.append(
+                {
+                    "response_tokens": response,
+                    "response_text": response_text,
+                    "old_logprobs": old_logprobs,
+                    "sampling_logprobs": old_logprobs,
+                    "reward": reward,
+                    "finish_reason": finish_reason,
+                }
+            )
+            generated_tokens += len(response)
+        group = {
+            "type": "prompt_group",
+            "group_id": str(
+                rows[group_index].get(
+                    "id", rows[group_index].get("group_id", group_index)
+                )
+            ),
+            "prompt_tokens": list(prompt),
+            "target_tokens": list(target),
+            "prompt_text": prompt_texts[group_index],
+            "target_text": target_texts[group_index],
+            "completions": completions,
+        }
+        if is_gsm8k:
+            group["task"] = "gsm8k"
+            group["answer"] = str(rows[group_index]["answer"])
+        groups.append(group)
+        print(
+            f"hf_reference rollout groups={group_index + 1}/{len(prompts)} "
+            f"tokens={generated_tokens} elapsed_s={time.perf_counter() - started:.1f}",
+            file=sys.stderr,
+            flush=True,
+        )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - started
+    peak_memory = (
+        torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    )
+    del model
+    tokenizer_fp = tokenizer_fingerprint(tokenizer_path, int(config.vocab_size))
+    manifest = {
+        "type": "manifest",
+        "schema_version": 1,
+        "architecture": (config.architectures or ["AutoModelForCausalLM"])[0],
+        "model_type": config.model_type,
+        "model_source": str(model_path),
+        "model_fingerprint": model_fingerprint(model_path),
+        "tokenizer_fingerprint": tokenizer_fp,
+        "tokenizer_mode": "text",
+        "vocab_size": int(config.vocab_size),
+        "task": "gsm8k" if is_gsm8k else "generic",
+        "prompt_format": "gsm8k_chat_no_thinking_v1" if is_gsm8k else None,
+        "sampling": {
+            "temperature": args.temperature,
+            "top_p": 1.0,
+            "seed": args.seed,
+            "request_seed_scheme": "sha256_base_seed_and_flat_index_v1",
+        },
+        "logprob_convention": "temperature_scaled_untruncated_policy",
+        "logprob_tolerance": 0.5 if args.dtype == "bfloat16" else None,
+        "generation": {
+            "max_new_tokens": args.max_new_tokens,
+            "num_generations": args.num_generations,
+            "eos_token_ids": list(eos_token_ids),
+        },
+        "reward_function": "gsm8k_exact_match_v1"
+        if is_gsm8k
+        else "token_prefix_accuracy_v1",
+        "prompt_group_count": len(groups),
+        "backend": "hf_transformers_incremental",
+        "engine": "hf_reference",
+        "forward_contract": {
+            "name": "qwen3_hf_incremental_cache_v1",
+            "attention_implementation": args.attention_implementation,
+            "weights_dtype": "float32",
+            "autocast_dtype": args.dtype,
+            "torch_version": torch.__version__,
+            "transformers_version": transformers.__version__,
+        },
+        "rollout_metrics": {
+            "elapsed_seconds": elapsed,
+            "generated_tokens": generated_tokens,
+            "tokens_per_sec": generated_tokens / max(elapsed, 1e-9),
+            "peak_memory_allocated_bytes": peak_memory,
+        },
+        "dtype": args.dtype,
+        "cache_released": True,
+        "environment": {
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "device": str(device),
+            "gpu": torch.cuda.get_device_name(device)
+            if device.type == "cuda"
+            else None,
+        },
+        "provenance": {
+            "git_revision": _git_revision(),
+            "git_dirty": _git_dirty(),
+            "command": " ".join(sys.argv),
+            "source_sha256": _fingerprint_files(
+                Path(__file__).resolve().parents[1], lambda path: path.suffix == ".py"
+            ),
+        },
+    }
+    if args.data_manifest:
+        manifest["data_manifest"] = str(Path(args.data_manifest).resolve())
+        manifest["data_fingerprint"] = hashlib.sha256(
+            Path(args.data_manifest).read_bytes()
+        ).hexdigest()
+        manifest["data_metadata"] = json.loads(Path(args.data_manifest).read_text())
+        manifest["prompt_file"] = str(Path(args.prompts).resolve())
+        manifest["prompt_file_sha256"] = hashlib.sha256(
+            Path(args.prompts).read_bytes()
+        ).hexdigest()
+    return _write_manifest(args.output, manifest, groups)
+
+
 def _request_sampling_seeds(seed: int, count: int) -> list[int]:
     # Adding the index to adjacent base seeds would reuse 7/8 draws per group
     # across seeds 2026/2027/2028. Hash each pair into an independent stream.
@@ -396,6 +675,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--model-path is required for model-source=path")
     if getattr(args, "engine", "paged_hf") == "sglang":
         return _run_sglang(args)
+    if getattr(args, "engine", "paged_hf") == "hf_reference":
+        return _run_hf_reference(args)
 
     device = _resolve_device(args.device)
     dtype = _dtype(args.dtype)
@@ -586,9 +867,14 @@ def _git_dirty() -> bool | None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate local GRPO rollouts")
-    parser.add_argument("--engine", choices=("paged_hf", "sglang"), default="paged_hf")
+    parser.add_argument(
+        "--engine", choices=("paged_hf", "sglang", "hf_reference"), default="paged_hf"
+    )
     parser.add_argument("--sglang-base-url", default=None)
     parser.add_argument("--sglang-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--attention-implementation", choices=("eager", "sdpa"), default="sdpa"
+    )
     parser.add_argument("--data-manifest", default=None)
     parser.add_argument("--model-source", choices=("random", "path"), default="path")
     parser.add_argument("--model-path")

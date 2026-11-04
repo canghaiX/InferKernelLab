@@ -189,7 +189,25 @@
       }
     }
   ],
-  "conclusion": "The stored rollout logprob matches SGLang teacher-forced sampler scores at tested positions. HF scores differ at rare tail tokens; running HF in the SGLang container reduces but does not eliminate the largest observed errors. Exact model-layer cause remains unresolved; max_abs_error gate 0.5 remains failed.",
+  "same_server_context_recheck": {
+    "server": "SGLang 0.5.18 FA3 with --rl-on-policy-target fsdp",
+    "hf": "Transformers 4.57.6, PyTorch 2.6.0+cu124, BF16 autocast, SDPA",
+    "repeat_count": 3,
+    "repeat_score_range": 0.0,
+    "cases": [
+      {"rollout_seed": 2026, "group_id": "train-907", "completion": 1, "response_position": 165, "rollout_logprob": -3.40625, "sglang_teacher_forced_logprob": -3.40625, "hf_full_logprob": -3.6018052101135254, "hf_prefix_logprob": -3.6018052101135254, "hf_full_vs_prefix_abs_error": 0.0, "sglang_vs_hf_final_hidden_max_abs_error": 1.3748369216918945, "rollout_vs_sglang_abs_error": 0.0},
+      {"rollout_seed": 2027, "group_id": "train-1499", "completion": 7, "response_position": 116, "rollout_logprob": -0.50390625, "sglang_teacher_forced_logprob": -0.50390625, "hf_full_logprob": -1.5906784534454346, "hf_prefix_logprob": -0.9983704090118408, "hf_full_vs_prefix_abs_error": 0.5923080444335938, "sglang_vs_hf_final_hidden_max_abs_error": 0.7000036239624023, "rollout_vs_sglang_abs_error": 0.0},
+      {"rollout_seed": 2028, "group_id": "train-3487", "completion": 6, "response_position": 111, "rollout_logprob": -4.09375, "sglang_teacher_forced_logprob": -4.09375, "hf_full_logprob": -5.860982894897461, "hf_prefix_logprob": -5.086873531341553, "hf_full_vs_prefix_abs_error": 0.7741093635559082, "sglang_vs_hf_final_hidden_max_abs_error": 0.4150505065917969, "rollout_vs_sglang_abs_error": 0.0}
+    ],
+    "scope_note": "The SGLang endpoint returns final request hidden states only, not per-layer activations."
+  },
+  "alternative_paths": {
+    "hf_incremental_kv_cache_bf16_autocast_abs_errors": [0.33548879623413086, 0.7617487907409668, 0.5688238143920898],
+    "hf_incremental_bf16_weights_abs_errors": [0.3280601501464844, 1.2246838808059692, 1.105616569519043],
+    "hf_fa2_fa3_unavailable": "The SGLang image has no usable Transformers FlashAttention 2/3 kernel package.",
+    "sglang_torch_native_unavailable": "SGLang 0.5.18 rejects torch_native when deterministic rl_on_policy_target=fsdp is enabled."
+  },
+  "conclusion": "The stored rollout logprob matches SGLang teacher-forced sampler scores and is stable on three repeated worst-case requests. HF differs at rare tail tokens. Full-sequence and prefix HF forwards diverge on two cases, and incremental HF cache execution remains over the 0.5 gate on two of three cases. The exact layer/operator cause is unresolved; no trainer change or optimizer update is justified.",
   "training_started": false,
   "optimizer_updated": false
 }

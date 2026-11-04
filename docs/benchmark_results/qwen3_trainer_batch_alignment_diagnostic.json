@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "task": "qwen3_grpo_trainer_batch_alignment",
+  "date": "2026-11-03",
+  "acceptance_tolerance_max_abs_logprob": 0.5,
+  "model_fingerprint": "7040300522d6a8e37168797ec9491af171e2328824b765546bbbe484249f9dd9",
+  "tokenizer_fingerprint": "7a50b53b219d9620306d5534cbe74327e4cfb72faf5578fc52fe56f9bc930791",
+  "source": {
+    "inferkernellab_commit": "ff164597a689baa0802d2dc21b706d68af1792ea",
+    "minitrainbench_commit": "4ade509b5f0d5213ea625da2cd46c71d7e374337",
+    "compare_script_sha256": "4504bcbb9697884258c2eec700cda580540463706485c2f83447e3e8425a5d2b",
+    "trainer_source_sha256": "331f1cace92adc1118525b74b4d41a39b8ab214d35d435b4aed45e6d834e7d19",
+    "worktrees_dirty": true
+  },
+  "environment": {
+    "gpu": "NVIDIA A100-SXM4-40GB",
+    "hf_torch": "2.6.0+cu124",
+    "hf_dtype": "bfloat16 autocast with float32 weights",
+    "hf_attention_implementation": "sdpa",
+    "temperature": 0.8,
+    "sglang_version": "0.5.18",
+    "sglang_dtype": "bfloat16",
+    "sglang_attention_backend": "fa3",
+    "sglang_sampling_backend": "pytorch",
+    "sglang_deterministic_inference": true,
+    "sglang_rl_on_policy_target": "fsdp"
+  },
+  "method": {
+    "trainer_batch": "Eight completions of one prompt, right padded with token id 0, binary attention mask, one HF forward, then response-token logits selected using the trainer's prompt offset and temperature scaling.",
+    "single_sequence": "One completion per HF forward with an all-ones attention mask and the same dtype, attention implementation, and temperature.",
+    "sglang": "Rollout token score independently re-scored with SGLang /generate token_ids_logprob at the same prompt prefix and target token.",
+    "sample_scope": "One previously recorded worst token from each of the three complete 256-prompt x 8-completion rollout preflights; this is a path diagnosis, not a replacement full-rollout gate."
+  },
+  "rollouts": [
+    {
+      "seed": 2026,
+      "rollout_sha256": "52c8f2bbe274e578379c89bd6e30dde2e364d286f33d39014783e038bcaf9bbf",
+      "case": {"group_id": "train-907", "completion": 1, "response_position": 165, "target_token_id": 151645, "is_eos": true},
+      "logprob": {"rollout": -3.40625, "sglang_teacher_forced": -3.40625, "hf_single_sequence": -3.6018052101135254, "hf_trainer_batch": -4.0588812828063965},
+      "absolute_error": {"rollout_vs_sglang": 0.0, "sglang_vs_hf_single": 0.1955552101135254, "sglang_vs_hf_trainer_batch": 0.6526312828063965, "hf_single_vs_hf_trainer_batch": 0.4570760726928711}
+    },
+    {
+      "seed": 2027,
+      "rollout_sha256": "9ee88e7853a302d1059825e4617cb1c64482a3f824aae32666d6f742a2fcbca5",
+      "case": {"group_id": "train-1499", "completion": 7, "response_position": 116, "target_token_id": 20, "is_eos": false},
+      "logprob": {"rollout": -0.50390625, "sglang_teacher_forced": -0.50390625, "hf_single_sequence": -1.5906784534454346, "hf_trainer_batch": -1.758207082748413},
+      "absolute_error": {"rollout_vs_sglang": 0.0, "sglang_vs_hf_single": 1.0867722034454346, "sglang_vs_hf_trainer_batch": 1.254300832748413, "hf_single_vs_hf_trainer_batch": 0.16752862930297852}
+    },
+    {
+      "seed": 2028,
+      "rollout_sha256": "33073ada65c76a9384a56e664c8461b417efca10a94572810d31b4c73a43f153",
+      "case": {"group_id": "train-3487", "completion": 6, "response_position": 111, "target_token_id": 21, "is_eos": false},
+      "logprob": {"rollout": -4.09375, "sglang_teacher_forced": -4.09375, "hf_single_sequence": -5.860982894897461, "hf_trainer_batch": -4.905335903167725},
+      "absolute_error": {"rollout_vs_sglang": 0.0, "sglang_vs_hf_single": 1.767232894897461, "sglang_vs_hf_trainer_batch": 0.8115859031677246, "hf_single_vs_hf_trainer_batch": 0.9556469917297363}
+    }
+  ],
+  "conclusion": {
+    "full_rollout_gate_passed": false,
+    "optimizer_updated": false,
+    "batch_shape_is_a_contributor": true,
+    "single_sequence_is_sufficient_for_all_three_seeds": false,
+    "trainer_compatibility_patch_attempted": false,
+    "reason": "The batch changes the seed 2026 worst-token error from 0.196 to 0.653, but the single-sequence HF path still exceeds 0.5 on seeds 2027 and 2028 (1.087 and 1.767). There is no supported trainer-only adjustment that passes the fixed gate, so the bounded iteration stops without optimizer updates."
+  },
+  "validation": {
+    "inferkernellab_pytest": "97 passed",
+    "minitrainbench_pytest": "passed with PYTHONPATH=src",
+    "ruff": "passed for changed Python files",
+    "format": "passed for changed Python files",
+    "json_validation": "passed",
+    "optimizer_updated": false
+  }
+}

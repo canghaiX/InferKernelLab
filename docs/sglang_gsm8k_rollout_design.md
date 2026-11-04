@@ -82,3 +82,50 @@ execution reduced the error but did not make all worst cases pass 0.5. This
 isolates the discrepancy to the SGLang/HF numerical forward path rather than
 stored rollout token alignment; the specific layer/operator cause remains open.
 The training-side gate continues to stop before optimizer updates.
+
+The diagnostic CLI now has opt-in `--capture-final-hidden-states`,
+`--prefix-forward-diagnostic`, and `--repeat-sglang-scores N` controls. With
+the server started using `--return-hidden-states-mode full`, these compare the
+SGLang final request state against HF and compare full-sequence versus prefix
+HF scores. On the three recorded worst cases, SGLang repeated scores were
+bitwise stable; full/prefix HF scores differed by 0.592 and 0.774 on two cases.
+The SGLang HTTP response does not expose per-layer activations, so this is not
+a layerwise attribution and does not establish an operator-level root cause.
+
+For layerwise capture, start SGLang with a diagnostic `forward_hooks` factory
+and run `scripts/capture_sglang_layer_probe.py` on one fixed token. The probe
+compares input/post-attention norms, attention, gate/up/down projections, MLP,
+and combined block outputs. On the three full-preflight worst tokens, the
+first block output above 0.1 max error occurred at layers 15, 17, and 7; early
+layer outputs were close and divergence grew with depth. Because the first
+divergent layer differs per sample and the hook compares module outputs across
+different residual representations, this is evidence of accumulated numeric
+path divergence, not proof of a single defective operator. Results are in
+[`benchmark_results/qwen3_layerwise_logprob_diagnostic.json`](benchmark_results/qwen3_layerwise_logprob_diagnostic.json).
+
+## HF Qwen3 correctness reference
+
+`--engine hf_reference` is a local-only Qwen3 rollout engine for establishing a trainable policy reference. It generates one completion at a time with Transformers `DynamicCache`, stores each temperature-scaled untruncated policy logprob, and keeps EOS with its score. GRPO requires `top_p=1`; FP32 weights and the selected autocast dtype are recorded in the manifest.
+
+The manifest's `forward_contract` binds the rollout to exact PyTorch and Transformers versions, attention implementation, weight dtype, autocast dtype, and incremental-cache mode. MiniTrainBench rejects mismatches before loading the actor or creating an optimizer. Existing `sglang` and Llama `paged_hf` artifacts keep their current interpretation.
+
+This serial path is a correctness baseline with intentionally low throughput. SGLang remains a separate serving engine for deployment-style evaluation and performance work; its logprobs are not used as the HF reference behavior policy. The 0.5 maximum absolute logprob gate still controls whether updates may proceed.
+
+The initial A100 smoke with four GSM8K prompts and eight completions passed
+preflight for 1,024 tokens (max absolute error 0.0), but its 32-token cap
+truncated all responses and produced no reward variance. An expanded smoke with
+eight prompts and a 256-token cap generated 11,332 tokens in 337 seconds; the
+trainer preflight again had max error 0.0. One dual-GPU BF16 GRPO update changed
+the policy with consistent rank digests and peaked at 19.7 GiB allocated memory.
+Step-2 DCP resume then passed with matching rank digests and peaked at 23.9 GiB.
+The current follow-up experiment uses seed 2026 only: its 256 × 8 HF reference
+rollout has been generated, while the full policy gate is still running. No
+formal 16-step update or updated-model test result is available yet. Training processes one
+completion at a time to release its autograd cache graph; DDP buffer broadcasts
+are disabled for this variable-forward-count path, while gradient reduction
+continues on the final completion backward.
+# Trainer Batch Alignment Diagnostic
+
+`scripts/compare_grpo_logprobs.py --trainer-batch-diagnostic` additionally scores all completions for a prompt in one right-padded HF forward, matching MiniTrainBench's preflight batch shape (including token-id-0 padding, binary attention mask, BF16 autocast, SDPA, and rollout temperature). Each selected token records that result alongside the one-completion HF forward and SGLang teacher-forced score. The summary at `docs/benchmark_results/qwen3_trainer_batch_alignment_diagnostic.json` captures the three fixed worst-token cases and their rollout hashes.
+
+The measured batch shape changes the error materially for some cases, but removing it does not bring all three worst cases below the fixed 0.5 maximum absolute logprob threshold. The diagnostic therefore does not justify a trainer compatibility patch or an optimizer update.
