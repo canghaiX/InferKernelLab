@@ -149,11 +149,14 @@ PYTHONPATH=src python3 -m inferkernellab.rollout \
   --num-generations 8 --max-new-tokens 256 --temperature 0.8 --top-p 1.0
 ```
 
-历史 Qwen3/SGLang rollout 的全量 BF16 logprob 预检未通过；当前另行执行 HF reference 单 seed 实验，未发布正式更新后的收益结论。
-HF reference 路径的 A100 8 题 × 8 completion smoke preflight 覆盖 11,332 个生成 token，
-max logprob error 为 0.0；MiniTrainBench 随后完成双卡更新和 step-2 DCP 恢复。本轮已验证证据、
-当前验收状态与复现入口见 MiniTrainBench 的 `docs/gsm8k_single_seed_run.md`；
-该探索实验不代表多 seed 稳定性或标准 GSM8K benchmark 提升。
+历史 Qwen3/SGLang rollout 的全量 BF16 logprob 预检未通过，该行为策略仍不能进入正式更新。
+独立的 HF reference 单 seed 闭环已在 MiniTrainBench 验收：seed 2026、256 题 × 8 completions，
+419,959-token 全量 gate max error=0；完成双 A100 BF16/DDP 16 步更新、rank 一致性、
+DCP 恢复 smoke 和最终模型/TrainState 回读。用 SGLang 0.5.18/FA3 greedy 评测完整 test，
+初始和更新模型均为 677/1,319（51.3268%），未测到 EM 提升。
+[完整结果与边界](https://github.com/canghaiX/MiniTrainBench/blob/main/docs/gsm8k_single_seed_result.md)及
+[复现入口](https://github.com/canghaiX/MiniTrainBench/blob/main/docs/gsm8k_single_seed_run.md)保留环境和源码指纹。
+HF 为串行 correctness 行为策略，SGLang 为独立评测引擎；不声称多 seed 稳定性或标准 benchmark 提升。
 本地初始模型完整测试集 EM 为 677/1,319；实测边界见
 [`docs/gsm8k_validation.md`](docs/gsm8k_validation.md)。
 固定 token 的 SGLang/HF logprob 对照入口为

@@ -118,9 +118,15 @@ eight prompts and a 256-token cap generated 11,332 tokens in 337 seconds; the
 trainer preflight again had max error 0.0. One dual-GPU BF16 GRPO update changed
 the policy with consistent rank digests and peaked at 19.7 GiB allocated memory.
 Step-2 DCP resume then passed with matching rank digests and peaked at 23.9 GiB.
-The current follow-up experiment uses seed 2026 only: its 256 × 8 HF reference
-rollout has been generated, while the full policy gate is still running. No
-formal 16-step update or updated-model test result is available yet. Training processes one
+The seed-2026 follow-up is complete: its 256 × 8 HF reference rollout passed
+all 419,959 tokens with max/mean/P99 logprob error 0.0. MiniTrainBench completed
+16 dual-A100 BF16/DDP steps with changed parameters and consistent ranks, then
+verified the final model/TrainState DCP digest. SGLang 0.5.18/FA3 greedy evaluation
+on all 1,319 test questions gave 677 correct before and after (51.3268% each):
+no measured EM improvement. This is one seed, not a stability or standard
+benchmark claim. HF rollout/training ran on the host with dirty provenance;
+the container fingerprint applies to SGLang evaluation only. See the
+[final report](https://github.com/canghaiX/MiniTrainBench/blob/main/docs/gsm8k_single_seed_result.md). Training processes one
 completion at a time to release its autograd cache graph; DDP buffer broadcasts
 are disabled for this variable-forward-count path, while gradient reduction
 continues on the final completion backward.
